@@ -54,9 +54,33 @@ enum Commands {
 
     /// Count notifications
     Count {
+        /// Filter by app name
+        #[arg(long)]
+        app: Option<String>,
+
+        /// Filter by urgency (low, normal, critical)
+        #[arg(long)]
+        urgency: Option<String>,
+
         /// Filter by status (unread, read, cleared)
         #[arg(long)]
         status: Option<String>,
+
+        /// Filter by category
+        #[arg(long)]
+        category: Option<String>,
+
+        /// Search in summary and body text
+        #[arg(long)]
+        search: Option<String>,
+
+        /// Show notifications since this ISO 8601 timestamp
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Show notifications until this ISO 8601 timestamp
+        #[arg(long)]
+        until: Option<String>,
 
         /// Output as JSON
         #[arg(long)]
@@ -157,8 +181,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
         }
 
-        Commands::Count { status, json } => {
-            client::count(status, json).await?;
+        Commands::Count { app, urgency, status, category, search, since, until, json } => {
+            client::count(client::CountFilter {
+                app,
+                urgency,
+                status,
+                category,
+                search,
+                since,
+                until,
+                json,
+            }).await?;
         }
 
         Commands::Show { id, json } => {

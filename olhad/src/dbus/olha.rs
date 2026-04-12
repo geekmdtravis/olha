@@ -36,27 +36,31 @@ impl ControlDaemon {
         Ok(json)
     }
 
-    /// Count notifications
-    /// Returns (unread_count, total_count)
-    async fn count(&self) -> Result<(u32, u32), zbus::fdo::Error> {
+    /// Count notifications with optional filter (JSON)
+    /// Returns JSON with unread and total counts
+    async fn count(&self, filter: String) -> Result<String, zbus::fdo::Error> {
+        let base_filter = parse_filter(&filter);
+
         let conn = self.state.open_db().map_err(|e| {
             zbus::fdo::Error::Failed(format!("Database error: {}", e))
         })?;
 
-        let unread_filter = NotificationFilter {
-            status: Some(NotificationStatus::Unread),
-            ..Default::default()
-        };
+        let mut unread_filter = base_filter.clone();
+        unread_filter.status = Some(NotificationStatus::Unread);
         let unread = queries::count_notifications(&conn, &unread_filter).map_err(|e| {
             zbus::fdo::Error::Failed(format!("Query error: {}", e))
-        })? as u32;
+        })?;
 
-        let total_filter = NotificationFilter::default();
-        let total = queries::count_notifications(&conn, &total_filter).map_err(|e| {
+        let total = queries::count_notifications(&conn, &base_filter).map_err(|e| {
             zbus::fdo::Error::Failed(format!("Query error: {}", e))
-        })? as u32;
+        })?;
 
-        Ok((unread, total))
+        let result = serde_json::json!({
+            "unread": unread,
+            "total": total,
+        });
+
+        Ok(result.to_string())
     }
 
     /// Mark notifications as read

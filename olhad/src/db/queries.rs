@@ -52,7 +52,7 @@ pub fn get_notification(conn: &Connection, row_id: i64) -> DbResult<Option<Notif
 }
 
 /// Fetch notifications with optional filtering
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct NotificationFilter {
     pub app_name: Option<String>,
     pub urgency: Option<Urgency>,
@@ -162,7 +162,11 @@ pub fn count_notifications(conn: &Connection, filter: &NotificationFilter) -> Db
 
     let mut stmt = conn.prepare(&query)?;
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    let count: i64 = stmt.query_row(param_refs.as_slice(), |row| row.get(0))?;
+    let count: i64 = match stmt.query_row(param_refs.as_slice(), |row| row.get(0)) {
+        Ok(c) => c,
+        Err(rusqlite::Error::QueryReturnedNoRows) => 0,
+        Err(e) => return Err(e.into()),
+    };
 
     Ok(count)
 }

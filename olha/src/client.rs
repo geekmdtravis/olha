@@ -11,7 +11,7 @@ use crate::output;
 )]
 pub trait ControlDaemon {
     fn list(&self, filter: &str) -> zbus::Result<String>;
-    fn count(&self) -> zbus::Result<(u32, u32)>;
+    fn count(&self, filter: &str) -> zbus::Result<String>;
     fn mark_read(&self, ids: &[u64]) -> zbus::Result<()>;
     fn mark_read_all(&self) -> zbus::Result<()>;
     fn clear(&self, ids: &[u64]) -> zbus::Result<()>;
@@ -35,6 +35,17 @@ pub struct ListFilter {
     pub since: Option<String>,
     pub until: Option<String>,
     pub limit: i64,
+    pub json: bool,
+}
+
+pub struct CountFilter {
+    pub app: Option<String>,
+    pub urgency: Option<String>,
+    pub status: Option<String>,
+    pub category: Option<String>,
+    pub search: Option<String>,
+    pub since: Option<String>,
+    pub until: Option<String>,
     pub json: bool,
 }
 
@@ -64,16 +75,32 @@ pub async fn list(filter: ListFilter) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-pub async fn count(_status: Option<String>, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn count(filter: CountFilter) -> Result<(), Box<dyn std::error::Error>> {
     let connection = zbus::Connection::session().await?;
     let proxy = ControlDaemonProxy::new(&connection).await?;
 
-    let (unread, total) = proxy.count().await?;
+    let filter_json = json!({
+        "app": filter.app,
+        "urgency": filter.urgency,
+        "status": filter.status,
+        "category": filter.category,
+        "search": filter.search,
+        "since": filter.since,
+        "until": filter.until,
+    });
 
-    if json {
-        println!("{{\"unread\":{},\"total\":{}}}", unread, total);
+    let result = proxy.count(filter_json.to_string().as_str()).await?;
+
+    if filter.json {
+        println!("{}", result);
     } else {
-        println!("Notifications: {} unread, {} total", unread, total);
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&result) {
+            let unread = val.get("unread").and_then(|v| v.as_i64()).unwrap_or(0);
+            let total = val.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
+            println!("Notifications: {} unread, {} total", unread, total);
+        } else {
+            println!("{}", result);
+        }
     }
 
     Ok(())

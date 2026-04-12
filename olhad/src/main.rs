@@ -6,6 +6,7 @@ mod dbus;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use clap::Parser;
 use tracing_subscriber;
 use zbus::Connection;
 
@@ -13,6 +14,14 @@ use config::Config;
 use db::DbResult;
 use dbus::{NotificationsDaemon, ControlDaemon};
 use rules::RulesEngine;
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Cli {
+    /// Increase output verbosity (-v for warning, -vv for info, -vvv for debug)
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
+}
 
 /// Shared daemon state accessible by all D-Bus handlers
 pub struct DaemonState {
@@ -30,12 +39,17 @@ impl DaemonState {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize logging
+    let cli = Cli::parse();
+
+    let log_level = match cli.verbose {
+        0 => tracing_subscriber::filter::LevelFilter::INFO,
+        1 => tracing_subscriber::filter::LevelFilter::WARN,
+        2 => tracing_subscriber::filter::LevelFilter::INFO,
+        _ => tracing_subscriber::filter::LevelFilter::DEBUG,
+    };
+
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing_subscriber::filter::LevelFilter::INFO.into()),
-        )
+        .with_max_level(log_level)
         .init();
 
     // Load configuration

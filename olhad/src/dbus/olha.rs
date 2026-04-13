@@ -2,6 +2,7 @@ use zbus::interface;
 use zbus::object_server::SignalEmitter;
 use std::sync::Arc;
 use serde_json;
+use tracing;
 
 use crate::DaemonState;
 use crate::notification::{NotificationStatus, Urgency};
@@ -268,6 +269,9 @@ fn parse_filter(filter_json: &str) -> NotificationFilter {
     if f.limit.is_none() {
         f.limit = Some(50);
     }
+
+    tracing::debug!("parsed filter: app={:?}, urgency={:?}, status={:?}, category={:?}, search={:?}, since={:?}, until={:?}, limit={:?}",
+        f.app_name, f.urgency, f.status, f.category, f.search, f.since, f.until, f.limit);
 
     f
 }

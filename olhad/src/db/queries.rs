@@ -2,6 +2,7 @@ use crate::db::DbResult;
 use crate::notification::{ClosedReason, Notification, NotificationStatus, Urgency};
 use chrono::Utc;
 use rusqlite::{params, Connection, Row};
+use tracing;
 
 /// Insert a new notification into the database
 pub fn insert_notification(conn: &Connection, notif: &Notification) -> DbResult<i64> {
@@ -122,6 +123,53 @@ impl NotificationFilter {
 
         (query, params)
     }
+
+    /// Build SQL query for COUNT(*) with same filtering
+    fn build_count_query(&self) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+        let mut query = "SELECT COUNT(*) FROM notifications WHERE 1=1".to_string();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(ref app) = self.app_name {
+            query.push_str(" AND app_name = ?");
+            params.push(Box::new(app.clone()));
+        }
+
+        if let Some(urgency) = self.urgency {
+            query.push_str(" AND urgency = ?");
+            params.push(Box::new(urgency.as_u32() as i64));
+        }
+
+        if let Some(status) = self.status {
+            query.push_str(" AND status = ?");
+            params.push(Box::new(status.as_str().to_string()));
+        }
+
+        if let Some(ref cat) = self.category {
+            query.push_str(" AND category = ?");
+            params.push(Box::new(cat.clone()));
+        }
+
+        if let Some(ref search) = self.search {
+            query.push_str(" AND (summary LIKE ? OR body LIKE ?)");
+            let pattern = format!("%{}%", search);
+            params.push(Box::new(pattern.clone()));
+            params.push(Box::new(pattern));
+        }
+
+        if let Some(ref since) = self.since {
+            query.push_str(" AND created_at >= ?");
+            params.push(Box::new(since.clone()));
+        }
+
+        if let Some(ref until) = self.until {
+            query.push_str(" AND created_at <= ?");
+            params.push(Box::new(until.clone()));
+        }
+
+        tracing::debug!("count query: {}, param count: {}", query, params.len());
+
+        (query, params)
+    }
 }
 
 /// Query notifications with filtering
@@ -145,20 +193,7 @@ pub fn query_notifications(
 
 /// Count notifications with filtering
 pub fn count_notifications(conn: &Connection, filter: &NotificationFilter) -> DbResult<i64> {
-    let (mut query, params) = filter.build_query();
-
-    // Replace SELECT ... FROM with COUNT(*)
-    query = query.replace(
-        "SELECT id, dbus_id, app_name, app_icon, summary, body, urgency, category,
-                           desktop_entry, actions, hints, status, expire_timeout, created_at, updated_at,
-                           closed_reason FROM",
-        "SELECT COUNT(*) FROM"
-    );
-    query = query
-        .split(" ORDER BY")
-        .next()
-        .unwrap_or(&query)
-        .to_string();
+    let (query, params) = filter.build_count_query();
 
     let mut stmt = conn.prepare(&query)?;
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -167,6 +202,8 @@ pub fn count_notifications(conn: &Connection, filter: &NotificationFilter) -> Db
         Err(rusqlite::Error::QueryReturnedNoRows) => 0,
         Err(e) => return Err(e.into()),
     };
+
+    tracing::debug!("count result: {}", count);
 
     Ok(count)
 }

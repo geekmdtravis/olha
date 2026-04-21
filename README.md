@@ -158,6 +158,78 @@ When a notification matches **all** specified fields in a rule, the action is ta
 - `clear` — automatically dismiss the notification (marks as cleared)
 - `ignore` — don't store the notification in the database at all
 
+Patterns are compiled with Rust's [`regex`](https://docs.rs/regex) crate —
+unanchored and case-sensitive by default. See
+[Regex syntax](#regex-syntax) under the popup-rules section below for
+anchoring, `(?i)` flags, and the TOML escaping foot-gun (prefer
+`'single-quoted'` strings for patterns).
+
+### Popup-side Rules
+
+Daemon `[[rules]]` act at storage time. A separate `[[popup.rules]]` list lets
+`olha-popup` filter or rewrite notifications at *display* time — useful for
+apps (e.g., Microsoft Teams) that flag everything as critical and dominate
+the feed. Rules are evaluated in order; first match wins.
+
+```toml
+# Demote every Teams "critical" to "normal" so it auto-dismisses.
+[[popup.rules]]
+name             = "demote-teams"
+app_name         = '^Microsoft Teams$'
+override_urgency = "normal"
+
+# Never pop a Spotify notification (daemon still stores it).
+[[popup.rules]]
+name     = "hide-spotify"
+app_name = '^Spotify$'
+suppress = true
+
+# Force a 4-second dismiss for Slack popups regardless of urgency.
+[[popup.rules]]
+name                  = "short-timeout-for-slack"
+app_name              = '^Slack$'
+override_timeout_secs = 4
+```
+
+Match fields: `app_name`, `summary`, `body` (regex) and `urgency`
+(exact — one of `"low" | "normal" | "critical"`). Actions: `suppress`,
+`override_urgency`, `override_timeout_secs` (a single rule may combine
+multiple). A rule with no match fields is a catch-all and fires on every
+notification — always include at least one match field unless that's what
+you want.
+
+#### Regex syntax
+
+Patterns are compiled with Rust's [`regex`](https://docs.rs/regex) crate.
+A few things to know:
+
+- **Unanchored by default.** `'Slack'` matches `Slack`, `Slack Desktop`,
+  and `slackware`. Use `^…$` when you need an exact match.
+- **Case-sensitive by default.** Prepend `(?i)` for case-insensitive —
+  e.g. `'(?i)^slack$'` matches both `Slack` and `SLACK`.
+- **No lookaround or backreferences.** The `regex` crate is linear-time
+  and omits `(?=…)`, `(?!…)`, `\1`, etc. Everything else in standard
+  Perl-ish syntax works: `|`, `?`, `*`, `+`, `{m,n}`, `[…]`, `\d \w \s`,
+  `(?i) (?m) (?s)` flags, Unicode classes `\p{…}`.
+- **Prefer TOML literal (single-quoted) strings for regexes.** Basic
+  strings (`"…"`) eat one layer of backslash escapes before the pattern
+  ever reaches the regex engine, which is a common foot-gun:
+
+  | What you want to match | Basic string (`"…"`) | Literal string (`'…'`) |
+  | ---------------------- | -------------------- | ---------------------- |
+  | literal `.`            | `"\\."`              | `'\.'`                 |
+  | digit                  | `"\\d"`              | `'\d'`                 |
+  | whitespace             | `"\\s"`              | `'\s'`                 |
+  | path separator         | `"home/\\w+"`        | `'home/\w+'`           |
+
+  Literal strings can't contain a single quote; for those rare patterns
+  use a basic string and double each backslash.
+
+Broken regexes are logged (`skipping popup rule "<name>": …`) and
+dropped — they don't stop the popup from starting or affect the other
+rules. See `olha-popup/src/rules.rs` for the matching semantics and unit
+tests covering each of these cases.
+
 ## CLI Reference
 
 ### List Notifications

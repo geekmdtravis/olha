@@ -140,14 +140,31 @@ impl NotificationConfig {
     }
 }
 
+/// Template written to `~/.config/olha/config.toml` on first run. Contains
+/// every option as a commented-out default so users discover knobs by
+/// reading the file rather than the README.
+const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("config.template.toml");
+
 impl Config {
-    /// Load config from file, or use defaults
+    /// Load config from file, or use defaults. On first run (XDG default
+    /// path missing) writes the template so the user has a file to edit.
     pub fn load(path: Option<&Path>) -> Result<Self, ConfigError> {
+        let explicit = path.is_some();
         let path = if let Some(p) = path {
             p.to_path_buf()
         } else {
             default_config_path()
         };
+
+        if !explicit && !path.exists() {
+            match write_default_config(&path) {
+                Ok(()) => tracing::info!("wrote default config to {}", path.display()),
+                Err(e) => tracing::warn!(
+                    "could not create default config at {}: {e}",
+                    path.display()
+                ),
+            }
+        }
 
         if path.exists() {
             let content = std::fs::read_to_string(&path)?;
@@ -191,6 +208,13 @@ fn default_config_path() -> PathBuf {
     config_home.join("olha").join("config.toml")
 }
 
+fn write_default_config(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, DEFAULT_CONFIG_TEMPLATE)
+}
+
 /// Parse a duration string like "30d", "7d", "1h", "30m"
 fn parse_duration(s: &str) -> Option<u64> {
     let s = s.trim();
@@ -227,5 +251,36 @@ mod tests {
         assert_eq!(parse_duration("1h"), Some(3600));
         assert_eq!(parse_duration("30m"), Some(1800));
         assert_eq!(parse_duration("60s"), Some(60));
+    }
+
+    /// The bundled template is what first-run users get written to disk, so
+    /// it must parse and produce the same values as `Config::default()`.
+    /// Every setting is commented out, so the deserializer falls back to
+    /// each field's serde default. A diff here means somebody added a knob
+    /// to the template without a matching `Config` field (or vice versa).
+    #[test]
+    fn default_config_template_parses_to_defaults() {
+        let parsed: Config = toml::from_str(DEFAULT_CONFIG_TEMPLATE)
+            .expect("bundled config template must be valid TOML");
+        let defaults = Config::default();
+        assert_eq!(parsed.retention.max_age, defaults.retention.max_age);
+        assert_eq!(parsed.retention.max_count, defaults.retention.max_count);
+        assert_eq!(
+            parsed.retention.cleanup_interval,
+            defaults.retention.cleanup_interval
+        );
+        assert_eq!(
+            parsed.notifications.default_timeout,
+            defaults.notifications.default_timeout
+        );
+        assert_eq!(
+            parsed.notifications.timeout_low,
+            defaults.notifications.timeout_low
+        );
+        assert_eq!(
+            parsed.notifications.timeout_critical,
+            defaults.notifications.timeout_critical
+        );
+        assert!(parsed.rules.is_empty());
     }
 }

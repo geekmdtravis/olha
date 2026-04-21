@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+use crate::model::Urgency;
+
 #[derive(Debug, Clone, Copy)]
 pub enum Position {
     TopRight,
@@ -69,6 +71,34 @@ pub struct PopupConfig {
     pub width: u32,
     #[serde(default = "default_height")]
     pub height: u32,
+    #[serde(default)]
+    pub rules: Vec<PopupRule>,
+}
+
+/// Popup-side filter applied to every incoming notification before it's
+/// rendered. Rules are evaluated in order; the first match wins.
+///
+/// Matching fields are regex patterns (unanchored); all specified fields must
+/// match for the rule to fire. If none are specified the rule matches
+/// everything. Actions are additive — a single rule may both override urgency
+/// and set a timeout, for example.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PopupRule {
+    #[serde(default)]
+    pub name: String,
+    pub app_name: Option<String>,
+    pub summary: Option<String>,
+    pub body: Option<String>,
+    pub urgency: Option<Urgency>,
+    /// If true, drop the notification — no popup is shown.
+    #[serde(default)]
+    pub suppress: bool,
+    /// Replace the notification's urgency before stacking/timeout logic runs.
+    /// Useful for demoting apps (e.g. Teams) that send everything as critical.
+    pub override_urgency: Option<Urgency>,
+    /// Force an expiry in seconds regardless of per-urgency defaults (0 =
+    /// never expire).
+    pub override_timeout_secs: Option<u32>,
 }
 
 fn default_position() -> Position {
@@ -99,6 +129,7 @@ impl Default for PopupConfig {
             gap: default_gap(),
             width: default_width(),
             height: default_height(),
+            rules: Vec::new(),
         }
     }
 }

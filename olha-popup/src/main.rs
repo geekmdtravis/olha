@@ -1,6 +1,7 @@
 mod config;
 mod dbus;
 mod model;
+mod rules;
 
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,7 @@ use tracing_subscriber::{fmt, EnvFilter};
 use crate::config::{AppConfig, Position};
 use crate::dbus::{connect, invoke_action, parse_signal_payload};
 use crate::model::{Notification, PopupState, Urgency};
+use crate::rules::PopupRules;
 
 fn main() -> iced_layershell::Result {
     tracing_subscriber::registry()
@@ -60,14 +62,20 @@ enum Message {
 
 struct App {
     config: AppConfig,
+    rules: PopupRules,
+    /// Insertion order == visual stack order; index 0 is the newest popup,
+    /// sitting closest to the anchor edge. Older popups slide toward the
+    /// opposite edge.
     popups: IndexMap<iced::window::Id, PopupState>,
     pending_close: Option<iced::window::Id>,
 }
 
 impl App {
     fn new(config: AppConfig) -> Self {
+        let rules = PopupRules::new(&config.popup.rules);
         Self {
             config,
+            rules,
             popups: IndexMap::new(),
             pending_close: None,
         }
@@ -105,6 +113,37 @@ impl App {
         }
     }
 
+    fn margin_for(&self, index: usize) -> (i32, i32, i32, i32) {
+        let (_, margin) = anchor_and_margin(
+            self.config.popup.position,
+            self.config.popup.margin,
+            self.config.popup.gap,
+            self.config.popup.height,
+            index,
+        );
+        margin
+    }
+
+    /// Emit `MarginChange` messages for popups starting at `start` so they
+    /// settle into their current `IndexMap` positions. Call this after any
+    /// insert/remove so the stack closes gaps and new popups push old ones
+    /// down. `start = 1` after inserting at index 0 skips the new popup (it's
+    /// already placed via `NewLayerShell`); `start = 0` after a removal
+    /// repositions the whole stack.
+    fn relayout_tasks(&self, start: usize) -> Vec<Task<Message>> {
+        self.popups
+            .keys()
+            .enumerate()
+            .skip(start)
+            .map(|(i, id)| {
+                Task::done(Message::MarginChange {
+                    id: *id,
+                    margin: self.margin_for(i),
+                })
+            })
+            .collect()
+    }
+
     fn new_layer_settings(&self, index: usize) -> NewLayerShellSettings {
         let (anchor, margin) = anchor_and_margin(
             self.config.popup.position,
@@ -130,32 +169,60 @@ impl App {
             Message::Incoming(notif) => self.handle_incoming(*notif),
             Message::Tick => self.handle_tick(),
             Message::ActionClicked(id, key) => self.handle_action(id, key),
-            Message::Dismiss(id) => {
-                self.popups.shift_remove(&id);
-                iced::window::close(id)
-            }
+            Message::Dismiss(id) => self.remove_and_relayout(id),
             Message::ActionResult(Err(e)) => {
                 tracing::warn!("invoke_action failed: {e}");
                 Task::none()
             }
             Message::ActionResult(Ok(())) => Task::none(),
             Message::WindowClosed(id) => {
-                self.popups.shift_remove(&id);
-                Task::none()
+                // Compositor closed (or we closed) the window — only relayout
+                // the survivors if this was actually one of ours.
+                if self.popups.shift_remove(&id).is_some() {
+                    Task::batch(self.relayout_tasks(0))
+                } else {
+                    Task::none()
+                }
             }
             _ => Task::none(),
         }
     }
 
+    fn remove_and_relayout(&mut self, id: iced::window::Id) -> Task<Message> {
+        if self.popups.shift_remove(&id).is_none() {
+            return iced::window::close(id);
+        }
+        let mut tasks = self.relayout_tasks(0);
+        tasks.push(iced::window::close(id));
+        Task::batch(tasks)
+    }
+
     fn handle_incoming(&mut self, notif: Notification) -> Task<Message> {
+        let decision = self.rules.evaluate(&notif);
+        if decision.suppress {
+            tracing::debug!(
+                "suppressing popup for app={:?} summary={:?} per rule {:?}",
+                notif.app_name,
+                notif.summary,
+                decision.matched.as_deref().unwrap_or("?"),
+            );
+            return Task::none();
+        }
+        let urgency = decision.override_urgency.unwrap_or(notif.urgency);
+        let effective_expire_timeout = match decision.override_timeout_secs {
+            Some(0) => 0,
+            Some(s) => (s as i32).saturating_mul(1000),
+            None => notif.expire_timeout,
+        };
+
         let evict_task = self.evict_if_needed();
 
-        let timeout = self.timeout_for(notif.urgency, notif.expire_timeout);
+        let timeout = self.timeout_for(urgency, effective_expire_timeout);
         let expires_at = timeout.map(|d| Instant::now() + d);
 
         let state = PopupState {
             row_id: notif.row_id,
-            urgency: notif.urgency,
+            urgency,
             app_name: notif.app_name,
             summary: notif.summary,
             body: notif.body,
@@ -163,24 +230,33 @@ impl App {
             expires_at,
         };
 
+        // Newest popup goes at index 0 (closest to the anchor edge) and
+        // shifts every existing popup one slot further away. NewLayerShell
+        // below places the new window directly at the correct margin; the
+        // relayout tasks reposition the now-shifted survivors.
         let id = iced::window::Id::unique();
-        let settings = self.new_layer_settings(self.popups.len());
-        self.popups.insert(id, state);
+        let settings = self.new_layer_settings(0);
+        self.popups.shift_insert(0, id, state);
 
-        let open = Task::done(Message::NewLayerShell { settings, id });
-        match evict_task {
-            Some(t) => Task::batch(vec![t, open]),
-            None => open,
+        let mut tasks: Vec<Task<Message>> = Vec::new();
+        if let Some(t) = evict_task {
+            tasks.push(t);
         }
+        tasks.extend(self.relayout_tasks(1));
+        tasks.push(Task::done(Message::NewLayerShell { settings, id }));
+        Task::batch(tasks)
     }
 
     fn evict_if_needed(&mut self) -> Option<Task<Message>> {
         if self.popups.len() < self.config.popup.max_visible {
             return None;
         }
+        // Oldest non-critical sits at the highest index now that newest is
+        // at index 0.
         let victim = self
             .popups
             .iter()
+            .rev()
             .find(|(_, s)| s.urgency != Urgency::Critical)
             .map(|(k, _)| *k);
         let id = victim?;
@@ -207,32 +283,39 @@ impl App {
         if let Some(id) = self.pending_close.take() {
             tasks.push(iced::window::close(id));
         }
+        let expired_count = expired.len();
         for id in expired {
             self.popups.shift_remove(&id);
             tasks.push(iced::window::close(id));
+        }
+        if expired_count > 0 {
+            tasks.extend(self.relayout_tasks(0));
         }
         Task::batch(tasks)
     }
 
     fn handle_action(&mut self, id: iced::window::Id, key: String) -> Task<Message> {
         let row_id = self.popups.get(&id).and_then(|s| s.row_id);
-        self.popups.shift_remove(&id);
-        let close = iced::window::close(id);
+        let existed = self.popups.shift_remove(&id).is_some();
+        let mut tasks: Vec<Task<Message>> = Vec::new();
+        if existed {
+            tasks.extend(self.relayout_tasks(0));
+        }
+        tasks.push(iced::window::close(id));
         match row_id {
             Some(row_id) => {
-                let invoke_task = Task::perform(
+                tasks.push(Task::perform(
                     async move { invoke_action(row_id, key).await },
                     Message::ActionResult,
-                );
-                Task::batch(vec![invoke_task, close])
+                ));
             }
             None => {
                 tracing::warn!(
                     "action '{key}' clicked but notification has no row_id; cannot invoke"
                 );
-                close
             }
         }
+        Task::batch(tasks)
     }
 
     fn view(&self, id: iced::window::Id) -> Element<'_, Message> {

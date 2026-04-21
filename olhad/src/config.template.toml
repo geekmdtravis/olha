@@ -1,0 +1,30 @@
+# olha notification center — created automatically on first run.
+# Every value shown is the built-in default; uncomment to customize.
+# For filter rule examples see the "Notification Rules" section in README.md.
+
+[general]
+# Optional: custom database path.
+# db_path = "~/.local/share/olha/notifications.db"
+
+[retention]
+# Max age of notifications kept in the database.
+# Units: d=days, h=hours, m=minutes, s=seconds.
+# max_age          = "30d"
+# max_count        = 10000
+# cleanup_interval = "1h"
+
+[notifications]
+# Per-urgency expiry (seconds). 0 = never expire.
+# default_timeout  = 10
+# timeout_low      = 5
+# timeout_critical = 0
+
+# Used by `olha-popup` (requires a wlr-layer-shell compositor).
+# Ignored by `olhad` itself.
+[popup]
+# position    = "top-right"   # top-right | top-left | bottom-right | bottom-left
+# max_visible = 5             # oldest non-critical popup is evicted when exceeded
+# margin      = 12            # px from screen edge
+# gap         = 8             # px between stacked popups
+# width       = 380
+# height      = 120

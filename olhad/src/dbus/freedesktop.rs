@@ -196,10 +196,12 @@ impl NotificationsDaemon {
                     app_name,
                     summary,
                 );
-                if let Err(e) = self.store_notification(&notif) {
-                    tracing::error!("Failed to store notification: {}", e);
-                } else {
-                    self.emit_notification_signal(&notif).await;
+                match self.store_notification(&notif) {
+                    Ok(row_id) => {
+                        notif.row_id = Some(row_id);
+                        self.emit_notification_signal(&notif).await;
+                    }
+                    Err(e) => tracing::error!("Failed to store notification: {}", e),
                 }
                 return Ok(id);
             }
@@ -215,10 +217,13 @@ impl NotificationsDaemon {
             summary,
         );
 
-        if let Err(e) = self.store_notification(&notif) {
-            tracing::error!("Failed to store notification: {}", e);
-        } else {
-            self.emit_notification_signal(&notif).await;
+        let mut notif = notif;
+        match self.store_notification(&notif) {
+            Ok(row_id) => {
+                notif.row_id = Some(row_id);
+                self.emit_notification_signal(&notif).await;
+            }
+            Err(e) => tracing::error!("Failed to store notification: {}", e),
         }
 
         Ok(id)

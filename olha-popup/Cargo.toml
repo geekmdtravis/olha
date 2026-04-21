@@ -1,0 +1,26 @@
+[package]
+name = "olha-popup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "olha popup — native Wayland (layer-shell) notifier for the olha daemon"
+
+[[bin]]
+name = "olha-popup"
+path = "src/main.rs"
+
+[dependencies]
+iced = { version = "0.14", features = ["tokio", "advanced"] }
+iced_layershell = "0.17"
+tokio = { workspace = true }
+zbus = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+dirs = { workspace = true }
+toml = "0.8"
+futures-util = "0.3"
+indexmap = "2"

@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- New workspace crate `olha-popup`: a native Wayland (wlr-layer-shell) notifier
+  built on iced + iced_layershell. Replaces the Alacritty-per-notification
+  shell recipe with stacked, actionable popups — clicking an action button
+  invokes it over D-Bus and the popup dismisses. Per-urgency accent colors,
+  configurable screen corner, `max_visible` eviction, and per-popup timeouts
+  honoring the existing `[notifications]` settings.
+- New `[popup]` section in `config.toml` (`position`, `max_visible`, `margin`,
+  `gap`, `width`, `height`) read by `olha-popup`; ignored by `olhad`.
 - Pretty table rendering for `olha list` using `comfy-table`, with bold headers
   and colorized `status` / `urgency` cells. Honors `NO_COLOR` and disables
   color on non-TTY output.
@@ -37,5 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than bytes, fixing alignment for multibyte strings.
 - `olha invoke` on a missing notification id or unknown action key now returns
   a clear error instead of a fake success.
+- `notification_received` D-Bus signal now carries `row_id` in its JSON
+  payload. Previously `store_notification`'s returned id was discarded and the
+  field was always omitted, which made it impossible for signal subscribers
+  (such as `olha-popup`) to invoke actions on the newly received notification.
 
 [Unreleased]: https://github.com/yourusername/olha/compare/HEAD

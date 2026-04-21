@@ -420,16 +420,82 @@ Create `~/.config/eww/eww.yuck`:
   (box (label :text (exec "olha list --json"))))
 ```
 
-### Hyprland
+### olha-popup (Wayland, Hyprland / Sway)
 
-olha integrates with Hyprland to show desktop notification popups using a small floating Alacritty window. No GTK, no extra daemons — just `olha subscribe` piped to a shell script that spawns a terminal popup with Hyprland window rules for positioning and styling.
+`olha-popup` is a native Wayland popup notifier built on `wlr-layer-shell`. It shows stacked, actionable popups at a screen corner, invokes notification actions (Open, Reply, …) on click, and dismisses itself on timeout or close. No terminal spawning, no `jq`, no window rules — it speaks directly to the daemon over D-Bus.
 
-**How it works**: `olha subscribe --json` streams notifications in real time. A small shell script reads each one, kills any previous popup, and spawns a new Alacritty window with a class that encodes the urgency level. Hyprland window rules position the window and set the border color based on that class.
+**Requirements**: a compositor that implements `wlr-layer-shell` (Hyprland, Sway, River, KDE Plasma 6 Wayland, etc.). GNOME Mutter is not supported — see the shell fallback below.
 
-#### 1. Add window rules to `~/.config/hypr/hyprland.conf`
+#### 1. Build and install
+
+```bash
+cargo install --path olha-popup
+```
+
+This installs the `olha-popup` binary to `~/.cargo/bin/`.
+
+#### 2. Autostart
+
+For Hyprland (`~/.config/hypr/hyprland.conf`):
 
 ```ini
-# Base positioning and behavior for all olha notification popups
+exec-once = olhad
+exec-once = olha-popup
+```
+
+For Sway (`~/.config/sway/config`):
+
+```
+exec olhad
+exec olha-popup
+```
+
+#### 3. Configure
+
+All options live under the `[popup]` section of `~/.config/olha/config.toml`. Defaults are sane; override any subset:
+
+```toml
+[popup]
+position    = "top-right"   # top-right | top-left | bottom-right | bottom-left
+max_visible = 5             # oldest non-critical popup is evicted when exceeded
+margin      = 12            # px from screen edge
+gap         = 8             # px between stacked popups
+width       = 380
+height      = 120
+```
+
+Per-urgency timeouts come from the existing `[notifications]` section:
+
+```toml
+[notifications]
+default_timeout  = 10   # seconds; normal urgency
+timeout_low      = 5
+timeout_critical = 0    # 0 = sticky until dismissed or replaced
+```
+
+The notifier also honors `expire_timeout` when the sender specifies it (in milliseconds, per the FDO spec); `0` from the sender means "never expire", `-1` means "use server default".
+
+#### 4. Actions
+
+When a notification carries actions (e.g., Firefox download complete with an **Open** button), `olha-popup` renders them as clickable buttons. Clicking one calls `org.olha.Daemon.InvokeAction`, which in turn emits the standard `ActionInvoked` signal back to the originating app — the normal D-Bus round-trip any notification daemon would perform. The popup also marks the notification as read.
+
+Try it:
+
+```bash
+notify-send --urgency=normal --app-name=Test \
+  "Hello" "Click a button" -A "open=Open" -A "dismiss=Dismiss"
+```
+
+### Shell-script fallback (non-layer-shell compositors)
+
+If your compositor does not implement `wlr-layer-shell` (e.g., GNOME Mutter), you can still drive popups from `olha subscribe --json` with a small script that spawns an Alacritty window per notification. This mode does *not* support clickable actions.
+
+<details>
+<summary>Show Alacritty+Hyprland shell recipe</summary>
+
+Add window rules to `~/.config/hypr/hyprland.conf`:
+
+```ini
 windowrule {
   name = olha-popup
   match:class = ^(olha-popup-.*)$
@@ -445,52 +511,39 @@ windowrule {
   rounding = 8
 }
 
-# Urgency-based border colors (Tokyo Night palette)
-windowrule = border_color rgb(7aa2f7), match:class ^(olha-popup-normal)$    # Normal: blue
-windowrule = border_color rgb(e0af68), match:class ^(olha-popup-low)$       # Low: amber
-windowrule = border_color rgb(f7768e), match:class ^(olha-popup-critical)$  # Critical: red
+windowrule = border_color rgb(7aa2f7), match:class ^(olha-popup-normal)$
+windowrule = border_color rgb(e0af68), match:class ^(olha-popup-low)$
+windowrule = border_color rgb(f7768e), match:class ^(olha-popup-critical)$
 ```
 
-Adjust `size`, `move`, and `border_color` values to taste. The `move` expression places the popup 20px from the right edge and 40px from the top. `pin` keeps it visible across workspaces. `no_initial_focus` and `no_focus` prevent the popup from stealing keyboard focus.
-
-#### 2. Create the popup script at `~/.config/olha/popup.sh`
+Create `~/.config/olha/popup.sh`:
 
 ```bash
 #!/bin/bash
-# olha notification popup for Hyprland + Alacritty
-# Spawns a small floating terminal for each notification.
-# Previous popup is killed when a new one arrives.
-
 cleanup() { pkill -f 'alacritty.*--class olha-popup' 2>/dev/null; }
 trap cleanup EXIT
 
 olha subscribe --json | while IFS= read -r line; do
-  # Kill previous popup
   pkill -f 'alacritty.*--class olha-popup' 2>/dev/null
-  sleep 0.05  # Brief pause to let the old window close
+  sleep 0.05
 
-  # Extract fields
   summary=$(echo "$line" | jq -r '.summary // ""')
   app=$(echo "$line" | jq -r '.app_name // ""')
   body=$(echo "$line" | jq -r '.body // ""')
   urgency=$(echo "$line" | jq -r '.urgency // "normal"')
 
-  # Timeout based on urgency (matches olha config defaults)
   case "$urgency" in
     low)      timeout=5 ;;
     critical) timeout=0 ;;
     *)        timeout=10 ;;
   esac
 
-  # Build display text
   text=""
   [ -n "$app" ] && text="[$app] "
   text="${text}${summary}"
   [ -n "$body" ] && text="${text}\n${body}"
 
-  # Spawn popup (class encodes urgency for Hyprland border color rules)
   if [ "$timeout" -eq 0 ]; then
-    # Critical: stays until next notification replaces it
     alacritty --class "olha-popup-${urgency}" --title "olha" \
       -e bash -c "echo -e '${text//\'/\\\'}'; cat" &
   else
@@ -500,46 +553,9 @@ olha subscribe --json | while IFS= read -r line; do
 done
 ```
 
-Make it executable:
+Then `chmod +x ~/.config/olha/popup.sh` and `exec-once = ~/.config/olha/popup.sh`. Dependencies: `alacritty`, `jq`.
 
-```bash
-chmod +x ~/.config/olha/popup.sh
-```
-
-**Dependencies**: `alacritty` and `jq`.
-
-#### 3. Add startup lines to `~/.config/hypr/hyprland.conf`
-
-```ini
-exec-once = olhad
-exec-once = ~/.config/olha/popup.sh
-```
-
-#### 4. Customize
-
-**Timeout**: Edit the `case` block in the script. The defaults match olha's config: 5s for low, 10s for normal, and critical notifications stay until replaced.
-
-**Position/size**: Edit the `move` and `size` values in the window rule. For example, to place popups in the top-left corner: `move = 20 40`.
-
-**Colors**: Edit the `border_color` values. Some palettes:
-
-| Palette | Low | Normal | Critical |
-|---------|-----|--------|----------|
-| Tokyo Night | `rgb(e0af68)` | `rgb(7aa2f7)` | `rgb(f7768e)` |
-| Catppuccin Mocha | `rgb(f9e2af)` | `rgb(b4befe)` | `rgb(f38ba8)` |
-| Gruvbox | `rgb(d8a657)` | `rgb(7daea3)` | `rgb(ea6962)` |
-
-**Hotkey to dismiss**: Add a keybind to kill the popup on demand:
-
-```ini
-bind = $mainMod, Escape, exec, pkill -f 'alacritty.*--class olha-popup'
-```
-
-**Hotkey to open notification list**:
-
-```ini
-bind = $mainMod, n, exec, alacritty --class olha-center --title "Notifications" -e bash -c "olha list; read -r -p 'Press Enter to close...'"
-```
+</details>
 
 ### Polybar
 

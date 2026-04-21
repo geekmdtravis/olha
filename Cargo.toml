@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["olhad", "olha"]
+members = ["olhad", "olha", "olha-popup"]
 
 [workspace.package]
 version = "0.1.0"

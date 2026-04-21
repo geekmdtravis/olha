@@ -1,10 +1,11 @@
 use zbus::interface;
-use zbus::object_server::SignalEmitter;
+use zbus::object_server::{InterfaceRef, SignalEmitter};
 use std::sync::Arc;
 use serde_json;
 use tracing;
 
 use crate::DaemonState;
+use crate::dbus::freedesktop::{NotificationsDaemon, NotificationsDaemonSignals};
 use crate::notification::{NotificationStatus, Urgency};
 use crate::db::queries::{self, NotificationFilter};
 
@@ -13,6 +14,8 @@ use crate::db::queries::{self, NotificationFilter};
 pub struct ControlDaemon {
     /// Access to DB and rules engine
     pub state: Arc<DaemonState>,
+    /// D-Bus connection, used to emit signals on the FDO interface
+    pub connection: zbus::Connection,
 }
 
 #[interface(name = "org.olha.Daemon")]
@@ -173,10 +176,69 @@ impl ControlDaemon {
         Ok(json)
     }
 
-    /// Invoke an action on a notification
+    /// Invoke an action on a notification.
+    ///
+    /// Looks up the notification by row id, emits `ActionInvoked` on the
+    /// freedesktop Notifications interface so the originating app can run the
+    /// handler, and flips the row to `read` (matches GUI-click behavior of
+    /// other notification daemons).
     async fn invoke_action(&self, id: u64, action_key: String) -> Result<(), zbus::fdo::Error> {
-        tracing::debug!("Invoking action {} on notification {}", action_key, id);
-        // TODO: emit ActionInvoked signal on the freedesktop interface
+        let conn = self.state.open_db().map_err(|e| {
+            zbus::fdo::Error::Failed(format!("Database error: {}", e))
+        })?;
+
+        let notif = queries::get_notification(&conn, id as i64)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?
+            .ok_or_else(|| {
+                zbus::fdo::Error::Failed(format!("Notification {} not found", id))
+            })?;
+
+        let has_action = notif.actions.iter().any(|a| a.id == action_key);
+        if !has_action {
+            return Err(zbus::fdo::Error::Failed(format!(
+                "Notification {} has no action '{}'",
+                id, action_key
+            )));
+        }
+
+        let iface_ref: InterfaceRef<NotificationsDaemon> = self
+            .connection
+            .object_server()
+            .interface("/org/freedesktop/Notifications")
+            .await
+            .map_err(|e| {
+                zbus::fdo::Error::Failed(format!(
+                    "Failed to locate Notifications interface: {}",
+                    e
+                ))
+            })?;
+
+        NotificationsDaemonSignals::action_invoked(
+            iface_ref.signal_emitter(),
+            notif.dbus_id,
+            &action_key,
+        )
+        .await
+        .map_err(|e| {
+            zbus::fdo::Error::Failed(format!("Failed to emit ActionInvoked: {}", e))
+        })?;
+
+        if let Some(row_id) = notif.row_id {
+            if let Err(e) = queries::update_status(&conn, row_id, NotificationStatus::Read) {
+                tracing::warn!(
+                    "ActionInvoked emitted for row {} but failed to mark read: {}",
+                    row_id,
+                    e
+                );
+            }
+        }
+
+        tracing::debug!(
+            "Invoked action '{}' on notification row {} (dbus_id {})",
+            action_key,
+            id,
+            notif.dbus_id,
+        );
         Ok(())
     }
 
@@ -217,8 +279,8 @@ impl ControlDaemon {
 }
 
 impl ControlDaemon {
-    pub fn new(state: Arc<DaemonState>) -> Self {
-        Self { state }
+    pub fn new(state: Arc<DaemonState>, connection: zbus::Connection) -> Self {
+        Self { state, connection }
     }
 }
 

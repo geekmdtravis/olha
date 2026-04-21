@@ -31,6 +31,27 @@ This installs two binaries:
 - `olhad` — the daemon
 - `olha` — the CLI client
 
+### Shell Completions
+
+`olha` can generate completion scripts for your shell.
+
+```bash
+# zsh — install into any directory on $fpath
+olha completions zsh > ~/.zfunc/_olha
+# ensure ~/.zfunc is on $fpath, then in your .zshrc:
+#   autoload -Uz compinit && compinit
+
+# bash
+olha completions bash > ~/.local/share/bash-completion/completions/olha
+
+# fish
+olha completions fish > ~/.config/fish/completions/olha.fish
+```
+
+The zsh script also registers an `ola` alias (`olha` spelled in Portuguese,
+meaning "look"). Add `alias ola=olha` to your shell rc and `ola <TAB>` will
+complete the same subcommands and flags as `olha <TAB>`.
+
 ## Quick Start
 
 1. **Start the daemon**:

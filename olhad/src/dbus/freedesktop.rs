@@ -1,5 +1,5 @@
 use zbus::interface;
-use zbus::object_server::InterfaceRef;
+use zbus::object_server::{InterfaceRef, SignalEmitter};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -283,12 +283,17 @@ impl NotificationsDaemon {
         ))
     }
 
-    // NOTE: Signals would be implemented here, but for now we'll skip them
-    // #[zbus(signal)]
-    // async fn notification_closed(&self, _id: u32, _reason: u32) -> Result<(), zbus::fdo::Error>;
-    //
-    // #[zbus(signal)]
-    // async fn action_invoked(&self, _id: u32, _action_key: String) -> Result<(), zbus::fdo::Error>;
+    /// Emitted when an action on a notification is invoked (by GUI click or
+    /// by `olha invoke`). The originating application listens for this signal
+    /// and runs the handler that corresponds to `action_key`.
+    #[zbus(signal)]
+    pub async fn action_invoked(
+        emitter: &SignalEmitter<'_>,
+        id: u32,
+        action_key: &str,
+    ) -> zbus::Result<()>;
+
+    // NOTE: notification_closed signal not yet implemented.
 }
 
 impl NotificationsDaemon {

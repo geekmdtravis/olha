@@ -1,7 +1,8 @@
 mod client;
 mod output;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 
 #[derive(Parser)]
 #[command(name = "olha")]
@@ -149,10 +150,27 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Generate shell completion script
+    ///
+    /// Install with e.g.:
+    ///   olha completions zsh > ~/.zfunc/_olha
+    /// then ensure ~/.zfunc is on $fpath and run `compinit`.
+    Completions {
+        /// Shell to generate completions for (bash, zsh, fish, powershell, elvish)
+        shell: Shell,
+    },
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
+    if let Err(e) = run().await {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -221,7 +239,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Status { json } => {
             client::status(json).await?;
         }
+
+        Commands::Completions { shell } => {
+            print_completions(shell);
+        }
     }
 
     Ok(())
+}
+
+fn print_completions(shell: Shell) {
+    let mut cmd = Cli::command();
+    let name = cmd.get_name().to_string();
+    let mut stdout = std::io::stdout();
+    clap_complete::generate(shell, &mut cmd, &name, &mut stdout);
+
+    // For zsh, also rebind the `ola` alias (Portuguese "olha") to the same
+    // completion function, so `ola <TAB>` works after `alias ola=olha`.
+    if matches!(shell, Shell::Zsh) {
+        use std::io::Write;
+        let _ = writeln!(stdout, "\ncompdef _olha ola");
+    }
 }

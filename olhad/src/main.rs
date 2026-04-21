@@ -83,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create the freedesktop notifications daemon
     let notif_daemon = NotificationsDaemon::new(Arc::clone(&state), connection.clone());
-    let control_daemon = ControlDaemon::new(Arc::clone(&state));
+    let control_daemon = ControlDaemon::new(Arc::clone(&state), connection.clone());
 
     // Register both interfaces
     connection

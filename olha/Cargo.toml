@@ -20,8 +20,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 dirs = { workspace = true }
 thiserror = { workspace = true }
-clap = { version = "4", features = ["derive"] }
-clap_complete = "4"
+clap = { version = "4", features = ["derive", "env", "unstable-ext"] }
+clap_complete = { version = "4", features = ["unstable-dynamic"] }
 comfy-table = "7"
 owo-colors = { version = "4", features = ["supports-colors"] }
 futures-util = "0.3"

@@ -1,8 +1,10 @@
 mod client;
 mod output;
 
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::Shell;
+use std::path::PathBuf;
+
+use clap::{CommandFactory, Parser, Subcommand, ValueHint};
+use clap_complete::{CompleteEnv, Shell};
 
 #[derive(Parser)]
 #[command(name = "olha")]
@@ -151,23 +153,28 @@ enum Commands {
         json: bool,
     },
 
-    /// Generate shell completion script
-    ///
-    /// Install with e.g.:
-    ///   olha completions zsh > ~/.zfunc/_olha
-    /// then ensure ~/.zfunc is on $fpath and run `compinit`.
-    Completions {
-        /// Shell to generate completions for (bash, zsh, fish, powershell, elvish)
+    /// Install shell tab completions
+    InstallCompletion {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
         shell: Shell,
+
+        /// Custom output path (optional)
+        #[arg(short, long, value_hint = ValueHint::FilePath)]
+        output: Option<PathBuf>,
     },
 }
 
-#[tokio::main]
-async fn main() {
-    if let Err(e) = run().await {
-        eprintln!("Error: {}", e);
-        std::process::exit(1);
-    }
+fn main() {
+    CompleteEnv::with_factory(Cli::command).complete();
+
+    let runtime = tokio::runtime::Runtime::new().expect("failed to start tokio runtime");
+    runtime.block_on(async {
+        if let Err(e) = run().await {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    });
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -240,24 +247,88 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             client::status(json).await?;
         }
 
-        Commands::Completions { shell } => {
-            print_completions(shell);
+        Commands::InstallCompletion { shell, output } => {
+            cmd_install_completion(shell, output)?;
         }
     }
 
     Ok(())
 }
 
-fn print_completions(shell: Shell) {
-    let mut cmd = Cli::command();
-    let name = cmd.get_name().to_string();
-    let mut stdout = std::io::stdout();
-    clap_complete::generate(shell, &mut cmd, &name, &mut stdout);
+fn cmd_install_completion(
+    shell: Shell,
+    output: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let activation = match shell {
+        Shell::Bash => "source <(COMPLETE=bash olha)".to_string(),
+        Shell::Zsh => "source <(COMPLETE=zsh olha)".to_string(),
+        Shell::Fish => "COMPLETE=fish olha | source".to_string(),
+        Shell::PowerShell => {
+            "$env:COMPLETE = \"powershell\"; olha | Out-String | Invoke-Expression".to_string()
+        }
+        Shell::Elvish => "eval (COMPLETE=elvish olha | slurp)".to_string(),
+        _ => return Err("unsupported shell".into()),
+    };
 
-    // For zsh, also rebind the `ola` alias (Portuguese "olha") to the same
-    // completion function, so `ola <TAB>` works after `alias ola=olha`.
-    if matches!(shell, Shell::Zsh) {
-        use std::io::Write;
-        let _ = writeln!(stdout, "\ncompdef _olha ola");
+    let zsh_zstyle = "zstyle ':completion:*:*:olha:*:*' sort false";
+
+    if let Some(path) = output {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+
+        let contents = match shell {
+            Shell::Fish => format!("{activation}\n"),
+            Shell::Zsh => format!("# olha completion\n{activation}\n{zsh_zstyle}\n"),
+            _ => format!("# olha completion\n{activation}\n"),
+        };
+
+        std::fs::write(&path, contents)?;
+        println!("Completion script written to: {}", path.display());
+        return Ok(());
     }
+
+    match shell {
+        Shell::Zsh => {
+            println!("Add the following lines to ~/.zshrc AFTER compinit:");
+            println!();
+            println!("    {activation}");
+            println!("    {zsh_zstyle}");
+            println!();
+            println!("For example:");
+            println!();
+            println!("    autoload -U compinit");
+            println!("    compinit");
+            println!("    {activation}");
+            println!("    {zsh_zstyle}");
+        }
+        Shell::Bash => {
+            println!("Add the following line to ~/.bashrc AFTER any bash-completion setup:");
+            println!();
+            println!("    {activation}");
+        }
+        Shell::Fish => {
+            println!("Add the following line to ~/.config/fish/config.fish:");
+            println!();
+            println!("    {activation}");
+        }
+        Shell::PowerShell => {
+            println!("Add the following line to your PowerShell profile:");
+            println!();
+            println!("    {activation}");
+        }
+        Shell::Elvish => {
+            println!("Add the following line to ~/.elvish/rc.elv:");
+            println!();
+            println!("    {activation}");
+        }
+        _ => return Err("unsupported shell".into()),
+    }
+
+    println!();
+    println!("Then restart your shell or source the config file.");
+
+    Ok(())
 }

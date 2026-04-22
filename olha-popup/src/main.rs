@@ -89,23 +89,15 @@ impl App {
         Some(Theme::Dark)
     }
 
-    fn timeout_for(&self, urgency: Urgency, expire_timeout: i32) -> Option<Duration> {
-        let per_urgency = match urgency {
+    fn timeout_for(&self, urgency: Urgency, override_secs: Option<u32>) -> Option<Duration> {
+        // Policy is owned by olha: the sender's expire_timeout is ignored.
+        // Precedence: matched rule's override_timeout_secs > per-urgency config.
+        // In both, a value of 0 means "never expire".
+        let secs = override_secs.unwrap_or_else(|| match urgency {
             Urgency::Low => self.config.notifications.timeout_low,
             Urgency::Normal => self.config.notifications.default_timeout,
             Urgency::Critical => self.config.notifications.timeout_critical,
-        };
-        // expire_timeout semantics (per FDO spec):
-        //   -1 -> server default (use per-urgency config)
-        //    0 -> never expire
-        //   >0 -> milliseconds
-        let secs: u32 = if expire_timeout < 0 {
-            per_urgency
-        } else if expire_timeout == 0 {
-            0
-        } else {
-            ((expire_timeout / 1000) as u32).max(1)
-        };
+        });
         if secs == 0 {
             None
         } else {
@@ -209,15 +201,10 @@ impl App {
             return Task::none();
         }
         let urgency = decision.override_urgency.unwrap_or(notif.urgency);
-        let effective_expire_timeout = match decision.override_timeout_secs {
-            Some(0) => 0,
-            Some(s) => (s as i32).saturating_mul(1000),
-            None => notif.expire_timeout,
-        };
 
         let evict_task = self.evict_if_needed();
 
-        let timeout = self.timeout_for(urgency, effective_expire_timeout);
+        let timeout = self.timeout_for(urgency, decision.override_timeout_secs);
         let expires_at = timeout.map(|d| Instant::now() + d);
 
         let state = PopupState {

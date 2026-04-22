@@ -36,8 +36,6 @@ pub struct Notification {
     pub urgency: Urgency,
     #[serde(default)]
     pub actions: Vec<Action>,
-    #[serde(default)]
-    pub expire_timeout: i32,
 }
 
 #[derive(Debug, Clone)]

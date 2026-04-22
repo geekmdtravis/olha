@@ -115,7 +115,6 @@ mod tests {
             body: body.into(),
             urgency,
             actions: Vec::new(),
-            expire_timeout: -1,
         }
     }
 

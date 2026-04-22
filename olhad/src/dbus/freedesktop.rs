@@ -230,7 +230,11 @@ impl NotificationsDaemon {
     }
 
     /// CloseNotification(id) -> ()
-    async fn close_notification(&self, id: u32) -> Result<(), zbus::fdo::Error> {
+    async fn close_notification(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        id: u32,
+    ) -> Result<(), zbus::fdo::Error> {
         let mut inner = self.inner.write().await;
         inner.mark_closed(id);
         drop(inner);
@@ -257,6 +261,10 @@ impl NotificationsDaemon {
             Err(e) => {
                 tracing::error!("Failed to open DB for CloseNotification: {}", e);
             }
+        }
+
+        if let Err(e) = Self::notification_closed(&emitter, id, 3).await {
+            tracing::error!("Failed to emit NotificationClosed(id={}, reason=3): {}", id, e);
         }
 
         tracing::debug!("Notification closed: id={}", id);
@@ -298,7 +306,18 @@ impl NotificationsDaemon {
         action_key: &str,
     ) -> zbus::Result<()>;
 
-    // NOTE: notification_closed signal not yet implemented.
+    /// Emitted when a notification is closed. `reason` follows the freedesktop
+    /// Notifications spec: 1 = expired, 2 = dismissed by user, 3 = closed by
+    /// call to CloseNotification, 4 = undefined/reserved.
+    ///
+    /// Senders (e.g. libnotify-based apps) commonly wait for this signal
+    /// after `ActionInvoked` before considering the action complete.
+    #[zbus(signal)]
+    pub async fn notification_closed(
+        emitter: &SignalEmitter<'_>,
+        id: u32,
+        reason: u32,
+    ) -> zbus::Result<()>;
 }
 
 impl NotificationsDaemon {

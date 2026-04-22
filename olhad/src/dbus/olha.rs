@@ -223,6 +223,20 @@ impl ControlDaemon {
             zbus::fdo::Error::Failed(format!("Failed to emit ActionInvoked: {}", e))
         })?;
 
+        // Per FDO spec, after an action is invoked the server must also emit
+        // NotificationClosed(id, reason=2 "dismissed by user"). libnotify-based
+        // apps (Signal Desktop, etc.) treat the action as complete only after
+        // this second signal arrives.
+        NotificationsDaemonSignals::notification_closed(
+            iface_ref.signal_emitter(),
+            notif.dbus_id,
+            2,
+        )
+        .await
+        .map_err(|e| {
+            zbus::fdo::Error::Failed(format!("Failed to emit NotificationClosed: {}", e))
+        })?;
+
         if let Some(row_id) = notif.row_id {
             if let Err(e) = queries::update_status(&conn, row_id, NotificationStatus::Read) {
                 tracing::warn!(

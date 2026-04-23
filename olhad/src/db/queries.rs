@@ -8,7 +8,7 @@ use tracing;
 pub fn insert_notification(conn: &Connection, notif: &Notification) -> DbResult<i64> {
     let now = Utc::now().to_rfc3339();
 
-    let row_id = conn.execute(
+    conn.execute(
         "INSERT INTO notifications (
             dbus_id, app_name, app_icon, summary, body, urgency, category,
             desktop_entry, actions, hints, status, expire_timeout, created_at, updated_at
@@ -31,7 +31,7 @@ pub fn insert_notification(conn: &Connection, notif: &Notification) -> DbResult<
         ],
     )?;
 
-    Ok(row_id as i64)
+    Ok(conn.last_insert_rowid())
 }
 
 /// Fetch a notification by row ID

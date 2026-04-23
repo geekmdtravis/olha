@@ -183,6 +183,8 @@ impl ControlDaemon {
     /// handler, and flips the row to `read` (matches GUI-click behavior of
     /// other notification daemons).
     async fn invoke_action(&self, id: u64, action_key: String) -> Result<(), zbus::fdo::Error> {
+        tracing::debug!("InvokeAction entry: row_id={} key={}", id, action_key);
+
         let conn = self.state.open_db().map_err(|e| {
             zbus::fdo::Error::Failed(format!("Database error: {}", e))
         })?;
@@ -190,11 +192,22 @@ impl ControlDaemon {
         let notif = queries::get_notification(&conn, id as i64)
             .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?
             .ok_or_else(|| {
+                tracing::debug!("InvokeAction: notification row_id={} not found", id);
                 zbus::fdo::Error::Failed(format!("Notification {} not found", id))
             })?;
 
-        let has_action = notif.actions.iter().any(|a| a.id == action_key);
+        // "default" is implicit per the FDO spec when the `default-action`
+        // capability is advertised — callers usually don't include it in the
+        // actions array, so accept it regardless.
+        let has_action = action_key == "default"
+            || notif.actions.iter().any(|a| a.id == action_key);
         if !has_action {
+            tracing::debug!(
+                "InvokeAction: notification row_id={} has no action '{}' (available: {:?})",
+                id,
+                action_key,
+                notif.actions.iter().map(|a| &a.id).collect::<Vec<_>>(),
+            );
             return Err(zbus::fdo::Error::Failed(format!(
                 "Notification {} has no action '{}'",
                 id, action_key
@@ -250,6 +263,66 @@ impl ControlDaemon {
         tracing::debug!(
             "Invoked action '{}' on notification row {} (dbus_id {})",
             action_key,
+            id,
+            notif.dbus_id,
+        );
+        Ok(())
+    }
+
+    /// Dismiss a notification from the GUI without invoking any action.
+    ///
+    /// Looks up the notification by row id, emits `NotificationClosed(id, 2)`
+    /// (reason = "dismissed by user") on the freedesktop interface so that
+    /// senders using `notify-send --wait` (or similar libnotify-based
+    /// workflows) stop blocking, and marks the row as `cleared`.
+    async fn dismiss(&self, id: u64) -> Result<(), zbus::fdo::Error> {
+        tracing::debug!("Dismiss entry: row_id={}", id);
+
+        let conn = self.state.open_db().map_err(|e| {
+            zbus::fdo::Error::Failed(format!("Database error: {}", e))
+        })?;
+
+        let notif = queries::get_notification(&conn, id as i64)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?
+            .ok_or_else(|| {
+                tracing::debug!("Dismiss: notification row_id={} not found", id);
+                zbus::fdo::Error::Failed(format!("Notification {} not found", id))
+            })?;
+
+        let iface_ref: InterfaceRef<NotificationsDaemon> = self
+            .connection
+            .object_server()
+            .interface("/org/freedesktop/Notifications")
+            .await
+            .map_err(|e| {
+                zbus::fdo::Error::Failed(format!(
+                    "Failed to locate Notifications interface: {}",
+                    e
+                ))
+            })?;
+
+        NotificationsDaemonSignals::notification_closed(
+            iface_ref.signal_emitter(),
+            notif.dbus_id,
+            2,
+        )
+        .await
+        .map_err(|e| {
+            zbus::fdo::Error::Failed(format!("Failed to emit NotificationClosed: {}", e))
+        })?;
+
+        if let Some(row_id) = notif.row_id {
+            if let Err(e) = queries::update_status(&conn, row_id, NotificationStatus::Cleared) {
+                tracing::warn!(
+                    "NotificationClosed emitted for row {} but failed to mark cleared: {}",
+                    row_id,
+                    e
+                );
+            }
+        }
+
+        tracing::debug!(
+            "Dismissed notification row {} (dbus_id {})",
             id,
             notif.dbus_id,
         );

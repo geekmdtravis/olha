@@ -18,7 +18,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use crate::config::{AppConfig, Position};
-use crate::dbus::{connect, invoke_action, parse_signal_payload};
+use crate::dbus::{connect, dismiss, invoke_action, parse_signal_payload};
 use crate::model::{Notification, PopupState, Urgency};
 use crate::rules::PopupRules;
 
@@ -161,9 +161,9 @@ impl App {
             Message::Incoming(notif) => self.handle_incoming(*notif),
             Message::Tick => self.handle_tick(),
             Message::ActionClicked(id, key) => self.handle_action(id, key),
-            Message::Dismiss(id) => self.remove_and_relayout(id),
+            Message::Dismiss(id) => self.handle_dismiss(id),
             Message::ActionResult(Err(e)) => {
-                tracing::warn!("invoke_action failed: {e}");
+                tracing::warn!("action/dismiss D-Bus call failed: {e}");
                 Task::none()
             }
             Message::ActionResult(Ok(())) => Task::none(),
@@ -178,15 +178,6 @@ impl App {
             }
             _ => Task::none(),
         }
-    }
-
-    fn remove_and_relayout(&mut self, id: iced::window::Id) -> Task<Message> {
-        if self.popups.shift_remove(&id).is_none() {
-            return iced::window::close(id);
-        }
-        let mut tasks = self.relayout_tasks(0);
-        tasks.push(iced::window::close(id));
-        Task::batch(tasks)
     }
 
     fn handle_incoming(&mut self, notif: Notification) -> Task<Message> {
@@ -283,6 +274,12 @@ impl App {
 
     fn handle_action(&mut self, id: iced::window::Id, key: String) -> Task<Message> {
         let row_id = self.popups.get(&id).and_then(|s| s.row_id);
+        tracing::debug!(
+            "handle_action: window_id={:?} key={} row_id={:?}",
+            id,
+            key,
+            row_id,
+        );
         let existed = self.popups.shift_remove(&id).is_some();
         let mut tasks: Vec<Task<Message>> = Vec::new();
         if existed {
@@ -301,6 +298,24 @@ impl App {
                     "action '{key}' clicked but notification has no row_id; cannot invoke"
                 );
             }
+        }
+        Task::batch(tasks)
+    }
+
+    fn handle_dismiss(&mut self, id: iced::window::Id) -> Task<Message> {
+        let row_id = self.popups.get(&id).and_then(|s| s.row_id);
+        tracing::debug!("handle_dismiss: window_id={:?} row_id={:?}", id, row_id);
+        let existed = self.popups.shift_remove(&id).is_some();
+        let mut tasks: Vec<Task<Message>> = Vec::new();
+        if existed {
+            tasks.extend(self.relayout_tasks(0));
+        }
+        tasks.push(iced::window::close(id));
+        if let Some(row_id) = row_id {
+            tasks.push(Task::perform(
+                async move { dismiss(row_id).await },
+                Message::ActionResult,
+            ));
         }
         Task::batch(tasks)
     }
@@ -343,6 +358,12 @@ fn signal_stream() -> impl iced::futures::Stream<Item = Message> {
         while let Some(sig) = stream.next().await {
             if let Ok(args) = sig.args() {
                 if let Some(notif) = parse_signal_payload(args.notification()) {
+                    tracing::debug!(
+                        "incoming popup: row_id={:?} dbus_id={} actions={:?}",
+                        notif.row_id,
+                        notif.dbus_id,
+                        notif.actions.iter().map(|a| &a.id).collect::<Vec<_>>(),
+                    );
                     let _ = sender.send(Message::Incoming(Box::new(notif))).await;
                 }
             }
@@ -391,16 +412,27 @@ fn popup_view(id: iced::window::Id, state: &PopupState) -> Element<'_, Message> 
 
     let summary = text(state.summary.as_str()).size(14);
 
-    let mut stack = column![header, summary].spacing(4);
-
+    // Summary + body are clickable and invoke the "default" action, which is
+    // implicit for any sender that advertises the default-action capability
+    // (most libnotify clients do). Action buttons and the × stay outside this
+    // region so they keep their own on_press behavior.
+    let mut default_stack = column![summary].spacing(4);
     if !state.body.is_empty() {
         let body = truncate_body(&state.body, 220);
-        stack = stack.push(
+        default_stack = default_stack.push(
             text(body)
                 .size(12)
                 .style(|_: &Theme| text::Style { color: Some(subtle()) }),
         );
     }
+    let default_region: Element<'_, Message> = button(default_stack)
+        .on_press(Message::ActionClicked(id, "default".to_string()))
+        .style(default_region_style)
+        .padding(0)
+        .width(Length::Fill)
+        .into();
+
+    let mut stack = column![header, default_region].spacing(4);
 
     if !state.actions.is_empty() {
         let mut action_row = row![].spacing(6);
@@ -492,6 +524,27 @@ fn ghost_button_style(_theme: &Theme, status: button::Status) -> button::Style {
                 0xFF, 0xFF, 0xFF, 0.12,
             )))
         }
+        _ => None,
+    };
+    button::Style {
+        background: bg,
+        text_color: foreground(),
+        border: iced::Border {
+            radius: 4.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn default_region_style(_theme: &Theme, status: button::Status) -> button::Style {
+    // Transparent button that still acts as a click target. A very faint
+    // hover tint makes the body feel interactive without making it look like
+    // a button.
+    let bg = match status {
+        button::Status::Hovered => Some(iced::Background::Color(Color::from_rgba8(
+            0xFF, 0xFF, 0xFF, 0.04,
+        ))),
         _ => None,
     };
     button::Style {

@@ -61,6 +61,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::debug!("Database path: {}", db_path.display());
     tracing::debug!("Config: {:?}", config);
 
+    // Snapshot the session env (WAYLAND_DISPLAY, GDK_SCALE, …) so spawned
+    // click handlers inherit GUI-correct vars regardless of how `olhad`
+    // itself was started.
+    launcher::init_session_env();
+
     // Initialize database
     let _conn = db::init(&db_path)?;
     tracing::info!("Database initialized");

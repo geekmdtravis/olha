@@ -1,14 +1,14 @@
+use serde_json;
+use std::sync::Arc;
+use tracing;
 use zbus::interface;
 use zbus::object_server::{InterfaceRef, SignalEmitter};
-use std::sync::Arc;
-use serde_json;
-use tracing;
 
-use crate::DaemonState;
+use crate::db::queries::{self, NotificationFilter};
 use crate::dbus::freedesktop::{NotificationsDaemon, NotificationsDaemonSignals};
 use crate::launcher;
 use crate::notification::{Notification, NotificationStatus, Urgency};
-use crate::db::queries::{self, NotificationFilter};
+use crate::DaemonState;
 
 /// Control daemon for olha (org.olha.Daemon)
 #[derive(Clone)]
@@ -26,17 +26,16 @@ impl ControlDaemon {
     async fn list(&self, filter: String) -> Result<String, zbus::fdo::Error> {
         let notif_filter = parse_filter(&filter);
 
-        let conn = self.state.open_db().map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Database error: {}", e))
-        })?;
+        let conn = self
+            .state
+            .open_db()
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Database error: {}", e)))?;
 
-        let notifications = queries::query_notifications(&conn, &notif_filter).map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Query error: {}", e))
-        })?;
+        let notifications = queries::query_notifications(&conn, &notif_filter)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?;
 
-        let json = serde_json::to_string(&notifications).map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Serialization error: {}", e))
-        })?;
+        let json = serde_json::to_string(&notifications)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Serialization error: {}", e)))?;
 
         Ok(json)
     }
@@ -46,19 +45,18 @@ impl ControlDaemon {
     async fn count(&self, filter: String) -> Result<String, zbus::fdo::Error> {
         let base_filter = parse_filter(&filter);
 
-        let conn = self.state.open_db().map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Database error: {}", e))
-        })?;
+        let conn = self
+            .state
+            .open_db()
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Database error: {}", e)))?;
 
         let mut unread_filter = base_filter.clone();
         unread_filter.status = Some(NotificationStatus::Unread);
-        let unread = queries::count_notifications(&conn, &unread_filter).map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Query error: {}", e))
-        })?;
+        let unread = queries::count_notifications(&conn, &unread_filter)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?;
 
-        let total = queries::count_notifications(&conn, &base_filter).map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Query error: {}", e))
-        })?;
+        let total = queries::count_notifications(&conn, &base_filter)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?;
 
         let result = serde_json::json!({
             "unread": unread,
@@ -71,14 +69,14 @@ impl ControlDaemon {
     /// Mark notifications as read
     /// ids: array of notification row IDs
     async fn mark_read(&self, ids: Vec<u64>) -> Result<(), zbus::fdo::Error> {
-        let conn = self.state.open_db().map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Database error: {}", e))
-        })?;
+        let conn = self
+            .state
+            .open_db()
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Database error: {}", e)))?;
 
         let row_ids: Vec<i64> = ids.iter().map(|&id| id as i64).collect();
-        queries::update_statuses(&conn, &row_ids, NotificationStatus::Read).map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Update error: {}", e))
-        })?;
+        queries::update_statuses(&conn, &row_ids, NotificationStatus::Read)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Update error: {}", e)))?;
 
         tracing::debug!("Marked {} notifications as read", ids.len());
         Ok(())
@@ -87,14 +85,14 @@ impl ControlDaemon {
     /// Clear (dismiss) notifications
     /// ids: array of notification row IDs
     async fn clear(&self, ids: Vec<u64>) -> Result<(), zbus::fdo::Error> {
-        let conn = self.state.open_db().map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Database error: {}", e))
-        })?;
+        let conn = self
+            .state
+            .open_db()
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Database error: {}", e)))?;
 
         let row_ids: Vec<i64> = ids.iter().map(|&id| id as i64).collect();
-        queries::update_statuses(&conn, &row_ids, NotificationStatus::Cleared).map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Update error: {}", e))
-        })?;
+        queries::update_statuses(&conn, &row_ids, NotificationStatus::Cleared)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Update error: {}", e)))?;
 
         tracing::debug!("Cleared {} notifications", ids.len());
         Ok(())
@@ -103,14 +101,14 @@ impl ControlDaemon {
     /// Delete notifications permanently
     /// ids: array of notification row IDs
     async fn delete(&self, ids: Vec<u64>) -> Result<(), zbus::fdo::Error> {
-        let conn = self.state.open_db().map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Database error: {}", e))
-        })?;
+        let conn = self
+            .state
+            .open_db()
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Database error: {}", e)))?;
 
         let row_ids: Vec<i64> = ids.iter().map(|&id| id as i64).collect();
-        queries::delete_notifications(&conn, &row_ids).map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Delete error: {}", e))
-        })?;
+        queries::delete_notifications(&conn, &row_ids)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Delete error: {}", e)))?;
 
         tracing::debug!("Deleted {} notifications", ids.len());
         Ok(())
@@ -118,14 +116,14 @@ impl ControlDaemon {
 
     /// Clear all active notifications
     async fn clear_all(&self) -> Result<(), zbus::fdo::Error> {
-        let conn = self.state.open_db().map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Database error: {}", e))
-        })?;
+        let conn = self
+            .state
+            .open_db()
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Database error: {}", e)))?;
 
         let from = &[NotificationStatus::Unread, NotificationStatus::Read];
-        queries::update_all_status(&conn, from, NotificationStatus::Cleared).map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Update error: {}", e))
-        })?;
+        queries::update_all_status(&conn, from, NotificationStatus::Cleared)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Update error: {}", e)))?;
 
         tracing::debug!("Cleared all notifications");
         Ok(())
@@ -133,14 +131,14 @@ impl ControlDaemon {
 
     /// Mark all unread notifications as read
     async fn mark_read_all(&self) -> Result<(), zbus::fdo::Error> {
-        let conn = self.state.open_db().map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Database error: {}", e))
-        })?;
+        let conn = self
+            .state
+            .open_db()
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Database error: {}", e)))?;
 
         let from = &[NotificationStatus::Unread];
-        queries::update_all_status(&conn, from, NotificationStatus::Read).map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Update error: {}", e))
-        })?;
+        queries::update_all_status(&conn, from, NotificationStatus::Read)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Update error: {}", e)))?;
 
         tracing::debug!("Marked all notifications as read");
         Ok(())
@@ -148,13 +146,13 @@ impl ControlDaemon {
 
     /// Delete all notifications permanently
     async fn delete_all(&self) -> Result<(), zbus::fdo::Error> {
-        let conn = self.state.open_db().map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Database error: {}", e))
-        })?;
+        let conn = self
+            .state
+            .open_db()
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Database error: {}", e)))?;
 
-        queries::delete_all(&conn).map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Delete error: {}", e))
-        })?;
+        queries::delete_all(&conn)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Delete error: {}", e)))?;
 
         tracing::debug!("Deleted all notifications");
         Ok(())
@@ -162,17 +160,16 @@ impl ControlDaemon {
 
     /// Get a single notification as JSON
     async fn get_notification(&self, id: u64) -> Result<String, zbus::fdo::Error> {
-        let conn = self.state.open_db().map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Database error: {}", e))
-        })?;
+        let conn = self
+            .state
+            .open_db()
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Database error: {}", e)))?;
 
-        let notif = queries::get_notification(&conn, id as i64).map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Query error: {}", e))
-        })?;
+        let notif = queries::get_notification(&conn, id as i64)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?;
 
-        let json = serde_json::to_string(&notif).map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Serialization error: {}", e))
-        })?;
+        let json = serde_json::to_string(&notif)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Serialization error: {}", e)))?;
 
         Ok(json)
     }
@@ -186,9 +183,10 @@ impl ControlDaemon {
     async fn invoke_action(&self, id: u64, action_key: String) -> Result<(), zbus::fdo::Error> {
         tracing::debug!("InvokeAction entry: row_id={} key={}", id, action_key);
 
-        let conn = self.state.open_db().map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Database error: {}", e))
-        })?;
+        let conn = self
+            .state
+            .open_db()
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Database error: {}", e)))?;
 
         let notif = queries::get_notification(&conn, id as i64)
             .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?
@@ -200,8 +198,8 @@ impl ControlDaemon {
         // "default" is implicit per the FDO spec when the `default-action`
         // capability is advertised — callers usually don't include it in the
         // actions array, so accept it regardless.
-        let has_action = action_key == "default"
-            || notif.actions.iter().any(|a| a.id == action_key);
+        let has_action =
+            action_key == "default" || notif.actions.iter().any(|a| a.id == action_key);
         if !has_action {
             tracing::debug!(
                 "InvokeAction: notification row_id={} has no action '{}' (available: {:?})",
@@ -221,10 +219,7 @@ impl ControlDaemon {
             .interface("/org/freedesktop/Notifications")
             .await
             .map_err(|e| {
-                zbus::fdo::Error::Failed(format!(
-                    "Failed to locate Notifications interface: {}",
-                    e
-                ))
+                zbus::fdo::Error::Failed(format!("Failed to locate Notifications interface: {}", e))
             })?;
 
         NotificationsDaemonSignals::action_invoked(
@@ -233,9 +228,7 @@ impl ControlDaemon {
             &action_key,
         )
         .await
-        .map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Failed to emit ActionInvoked: {}", e))
-        })?;
+        .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to emit ActionInvoked: {}", e)))?;
 
         // Per FDO spec, after an action is invoked the server must also emit
         // NotificationClosed(id, reason=2 "dismissed by user"). libnotify-based
@@ -266,8 +259,7 @@ impl ControlDaemon {
         // notification carried a `desktop-entry` hint, focus/launch that
         // app via `gtk-launch`. Both paths are best-effort — a failure here
         // never undoes the FDO signal the client already received.
-        if let Some((rule_name, cmd)) =
-            self.state.rules_engine.action_command(&notif, &action_key)
+        if let Some((rule_name, cmd)) = self.state.rules_engine.action_command(&notif, &action_key)
         {
             let env = env_from_notif(&notif, &action_key);
             tracing::debug!(
@@ -275,21 +267,13 @@ impl ControlDaemon {
                 rule_name,
                 action_key,
             );
-            if let Err(e) = launcher::spawn_shell_command(&cmd, &env).await {
-                tracing::warn!(
-                    "rule '{}' command failed to spawn: {}",
-                    rule_name,
-                    e,
-                );
+            if let Err(e) = launcher::spawn_shell_command(&cmd, &env) {
+                tracing::warn!("rule '{}' command failed to spawn: {}", rule_name, e,);
             }
         } else if action_key == "default" && !notif.desktop_entry.is_empty() {
             tracing::debug!("desktop-entry activation: {}", notif.desktop_entry);
-            if let Err(e) = launcher::activate_desktop_entry(&notif.desktop_entry).await {
-                tracing::warn!(
-                    "gtk-launch {} failed: {}",
-                    notif.desktop_entry,
-                    e,
-                );
+            if let Err(e) = launcher::activate_desktop_entry(&notif.desktop_entry) {
+                tracing::warn!("gtk-launch {} failed: {}", notif.desktop_entry, e,);
             }
         }
 
@@ -311,9 +295,10 @@ impl ControlDaemon {
     async fn dismiss(&self, id: u64) -> Result<(), zbus::fdo::Error> {
         tracing::debug!("Dismiss entry: row_id={}", id);
 
-        let conn = self.state.open_db().map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Database error: {}", e))
-        })?;
+        let conn = self
+            .state
+            .open_db()
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Database error: {}", e)))?;
 
         let notif = queries::get_notification(&conn, id as i64)
             .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?
@@ -328,10 +313,7 @@ impl ControlDaemon {
             .interface("/org/freedesktop/Notifications")
             .await
             .map_err(|e| {
-                zbus::fdo::Error::Failed(format!(
-                    "Failed to locate Notifications interface: {}",
-                    e
-                ))
+                zbus::fdo::Error::Failed(format!("Failed to locate Notifications interface: {}", e))
             })?;
 
         NotificationsDaemonSignals::notification_closed(
@@ -372,9 +354,10 @@ impl ControlDaemon {
 
     /// Get daemon status as JSON
     async fn status(&self) -> Result<String, zbus::fdo::Error> {
-        let conn = self.state.open_db().map_err(|e| {
-            zbus::fdo::Error::Failed(format!("Database error: {}", e))
-        })?;
+        let conn = self
+            .state
+            .open_db()
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Database error: {}", e)))?;
 
         let unread_filter = NotificationFilter {
             status: Some(NotificationStatus::Unread),

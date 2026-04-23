@@ -127,87 +127,197 @@ These timeouts control the D-Bus `expire_timeout` value sent back to the notific
 
 ### Notification Rules
 
-Rules allow you to automatically mute, clear, or ignore notifications based on patterns:
+Rules live in two independent lists under two different TOML sections,
+and they run at two different moments in a notification's life. Keeping
+this distinction in your head is the single biggest win when writing
+rules, because almost every "why didn't my rule fire?" question traces
+back to confusing the two lists, or to confusing the two differently
+named things called `action` inside a single daemon rule. This section
+spells both out.
+
+#### The pipeline at a glance
+
+```
+notify-send  ─────►  [ [[rules]] ]  ─────►  stored in SQLite  ─────►  [ [[popup.rules]] ]  ─────►  popup renders
+                      (olhad)                                          (olha-popup only)
+```
+
+| Stage         | TOML section      | Binary       | Controls                                                         |
+| ------------- | ----------------- | ------------ | ---------------------------------------------------------------- |
+| Daemon rules  | `[[rules]]`       | `olhad`      | Whether the notification is stored, and what a click does later. |
+| Popup rules   | `[[popup.rules]]` | `olha-popup` | Whether, and how, the popup is *displayed*.                      |
+
+Daemon rules run first. Popup rules only ever run if you're using
+`olha-popup`; the daemon itself never reads `[[popup.rules]]`. A popup
+rule cannot prevent storage (the daemon has already stored the
+notification by then), and a daemon rule cannot hide the popup without
+also touching storage — if you just want "don't pop this, but keep it in
+history," that's a job for `[[popup.rules]]`.
+
+Each list is evaluated in the order it appears in `config.toml` and
+**first match wins**.
+
+---
+
+#### Daemon rules (`[[rules]]`)
+
+A daemon rule has a **match** part (regex/urgency/category conditions)
+and a **verdict** part (the `action` field, plus an optional nested
+`[rules.on_action]` table). If every match condition is satisfied, the
+verdict takes effect.
+
+##### The two `action`s — not the same field, not the same moment
+
+The name collision is the single biggest source of confusion, so it's
+worth stating directly:
+
+- **`action`** — top-level scalar, **required**. This is the *storage
+  verdict*, evaluated **once, when the notification arrives**. It decides
+  whether the notification gets stored, silently dropped, or auto-cleared.
+  Exactly three values are valid: `"clear"`, `"ignore"`, `"none"`.
+- **`[rules.on_action]`** — nested table, optional. This is a map from
+  *notification action key* → shell command, evaluated **later, when the
+  user clicks a button on the popup**. The keys are action identifiers
+  that the sending application attached to the notification — things like
+  `"default"` (body click), `"reply"`, `"open"` — not storage verdicts.
+
+These two fields do not replace each other and are not alternatives. A
+rule that exists only to bind click handlers sets `action = "none"`
+(don't touch storage) and then fills in `[rules.on_action]`.
+
+##### Match fields
+
+All specified fields must match for the rule to fire. Any field you omit
+is ignored (not "must be empty").
+
+- `app_name`, `summary`, `body`, `category` — regex; see [Regex syntax](#regex-syntax).
+- `urgency` — exact string, one of `"low"`, `"normal"`, `"critical"`.
+
+##### The `action` verdict
+
+| Value    | What `olhad` does when the rule matches                                                 |
+| -------- | --------------------------------------------------------------------------------------- |
+| `clear`  | Store the notification, but immediately mark it as *cleared*. It appears in history but not as unread. |
+| `ignore` | Do not store the notification at all. It vanishes — not in `olha list`, not in the popup. |
+| `none`   | Store the notification normally (as unread). Use this when the rule exists only to attach `on_action` handlers. |
+
+Examples:
+
+```toml
+# Auto-clear Slack thread notifications — kept in history, never unread.
+[[rules]]
+name     = "mute-slack-threads"
+app_name = "Slack"
+summary  = "Thread:.*"
+action   = "clear"
+
+# Silently drop every Spotify notification.
+[[rules]]
+name     = "ignore-spotify"
+app_name = "Spotify"
+action   = "ignore"
+
+# Store normally, but watch for update-ish summaries across any app.
+[[rules]]
+name    = "system-updates"
+summary = "^(Update|Upgrade|Install)"
+action  = "clear"
+```
+
+##### The `[rules.on_action]` click handlers
+
+`olhad` emits the standard `ActionInvoked` D-Bus signal whenever the user
+clicks a popup button or the notification body. When the sending app is
+still subscribed to the FDO notifications interface, it handles that
+signal itself — typical for long-running GUI apps. When it isn't (the
+app exited, or never listened), the daemon can run something local
+instead:
+
+1. **Default desktop-entry activation.** For the implicit `"default"`
+   action (a body click), if the notification carries a `desktop-entry`
+   hint, `olhad` runs `gtk-launch <entry>` to focus or launch the app.
+   No config required.
+2. **Per-rule shell commands via `[rules.on_action]`.** A map from action
+   key to shell command. On a click, `olhad` walks the rule list in
+   order, finds the first rule that matches *and* has an entry for the
+   clicked action key, and runs that command under `sh -c`. This
+   overrides step 1.
 
 ```toml
 [[rules]]
-name = "mute-slack-threads"
-app_name = "Slack"
-summary = "Thread:.*"
-action = "clear"  # Automatically clear matched notifications
+name     = "focus-signal"
+app_name = '^Signal$'
+action   = "none"                                       # leave storage alone
 
-[[rules]]
-name = "ignore-spotify"
-app_name = "Spotify"
-action = "ignore"  # Don't store in database at all
-
-[[rules]]
-name = "system-updates"
-summary = "^(Update|Upgrade|Install)"
-action = "clear"
+[rules.on_action]
+default = "signal-desktop --activate"                    # click on body
+reply   = "notify-send 'Replied to $OLHA_SUMMARY'"       # click "Reply" button
 ```
 
-Rules are regex-based and support matching on:
-- `app_name` — the application name
-- `summary` — the notification title
-- `body` — the notification message
-- `urgency` — "low", "normal", or "critical"
-- `category` — the D-Bus category hint
+The spawned command inherits these environment variables:
 
-When a notification matches **all** specified fields in a rule, the action is taken:
-- `clear` — automatically dismiss the notification (marks as cleared)
-- `ignore` — don't store the notification in the database at all
-- `none` — store normally; pair with `on_action` (below) to bind clicks without altering storage
+| Variable               | Value                                        |
+| ---------------------- | -------------------------------------------- |
+| `OLHA_APP_NAME`        | The notification's `app_name`                |
+| `OLHA_SUMMARY`         | The notification's summary (title)           |
+| `OLHA_BODY`            | The notification's body                      |
+| `OLHA_URGENCY`         | `low` / `normal` / `critical`                |
+| `OLHA_ACTION_KEY`      | The action key that was clicked              |
+| `OLHA_DESKTOP_ENTRY`   | The notification's `desktop-entry` hint      |
+| `OLHA_NOTIFICATION_ID` | Database row id                              |
 
-Patterns are compiled with Rust's [`regex`](https://docs.rs/regex) crate —
-unanchored and case-sensitive by default. See
-[Regex syntax](#regex-syntax) under the popup-rules section below for
-anchoring, `(?i)` flags, and the TOML escaping foot-gun (prefer
-`'single-quoted'` strings for patterns).
+A rule command always beats desktop-entry activation. FDO signal emission
+is unchanged — a subscribed sender still receives `ActionInvoked`, and
+the rule's command also runs.
 
-#### Click handlers: `on_action`
+> **Pitfall: keys under `[rules.on_action]` are *action keys*, not
+> verdicts.** It's tempting to write something like
+>
+> ```toml
+> [rules.on_action]
+> none    = "hyprctl dispatch focuswindow class:signal"   # DEAD — never fires
+> default = "hyprctl dispatch focuswindow class:signal"   # the live one
+> ```
+>
+> because `"none"` is a valid value for the top-level `action` field.
+> But `[rules.on_action]` is keyed by *action keys the sending app
+> registered* (`default`, `reply`, `open`, etc.). No real app emits
+> `"clear"`, `"ignore"`, or `"none"` as action keys, so entries under
+> those names load but never match a click. `olhad` logs a warning
+> (`[rules.on_action] key "<key>" will never fire`) at startup when it
+> sees one. Rule of thumb: use `default` for body-click, and otherwise
+> use exactly what the app advertises — check `olha show <id>` to see
+> the action keys a given notification carries.
 
-`olha` emits `ActionInvoked` on the D-Bus interface when the user clicks a
-popup button or body. For a running app that's subscribed to the FDO
-interface (most GUI clients), the app handles the click itself. When the
-sender isn't subscribed — or you want to make the daemon do something
-locally — two mechanisms take over:
+##### How `olha-popup` uses `[[rules]]`
 
-1. **Default desktop-entry activation.** If a notification carries a
-   `desktop-entry` hint and the user invokes the implicit `"default"`
-   action (body click), `olha` runs `gtk-launch <entry>`, which focuses or
-   starts the app. No config required.
-2. **Per-rule shell commands.** Attach an `on_action` map to any rule to
-   override step 1 or bind additional action keys:
+`olha-popup` reads the same `[[rules]]` list as the daemon so it can
+render buttons and dispatch clicks through `on_action` commands. But
+**storage verdicts (`clear`/`ignore`/`none`) have already been applied by
+the time the popup sees anything.** Filters that only affect the popup
+itself live under `[[popup.rules]]` — described next.
 
-   ```toml
-   [[rules]]
-   name     = "focus-signal"
-   app_name = '^Signal$'
-   action   = "none"
+---
 
-   [rules.on_action]
-   default = "signal-desktop --activate"
-   reply   = "notify-send 'Replied to $OLHA_SUMMARY'"
-   ```
+#### Popup rules (`[[popup.rules]]`)
 
-   When the user clicks the matching popup, `olha` spawns the command
-   under `sh -c` with these env vars available:
+A second, independent list consumed only by `olha-popup`. These run when
+the popup is about to display a notification that the daemon has already
+stored. Popup rules cannot stop storage; they can only filter or rewrite
+what the popup does with the notification.
 
-   - `OLHA_APP_NAME`, `OLHA_SUMMARY`, `OLHA_BODY`
-   - `OLHA_URGENCY` (`low` / `normal` / `critical`)
-   - `OLHA_ACTION_KEY` (which button was clicked)
-   - `OLHA_DESKTOP_ENTRY`, `OLHA_NOTIFICATION_ID`
+| Field                   | Effect on the popup                                       |
+| ----------------------- | --------------------------------------------------------- |
+| `suppress = true`       | Don't show the popup at all (notification still in DB).   |
+| `override_urgency`      | Re-label for rendering only. One of `low`/`normal`/`critical`. |
+| `override_timeout_secs` | Force a specific auto-dismiss timeout, in seconds.        |
 
-   A rule command always wins over desktop-entry activation. FDO signal
-   emission is unchanged — subscribed senders still see `ActionInvoked`.
-
-### Popup-side Rules
-
-Daemon `[[rules]]` act at storage time. A separate `[[popup.rules]]` list lets
-`olha-popup` filter or rewrite notifications at *display* time — useful for
-apps (e.g., Microsoft Teams) that flag everything as critical and dominate
-the feed. Rules are evaluated in order; first match wins.
+A single rule may combine multiple of these. Match fields are the same
+as daemon rules (`app_name`, `summary`, `body`, `urgency`), with the
+same regex semantics. Rules are evaluated in order; first match wins. A
+rule with **no** match fields is a catch-all and fires on every
+notification — include at least one match field unless that's really
+what you want.
 
 ```toml
 # Demote every Teams "critical" to "normal" so it auto-dismisses.
@@ -229,12 +339,12 @@ app_name              = '^Slack$'
 override_timeout_secs = 4
 ```
 
-Match fields: `app_name`, `summary`, `body` (regex) and `urgency`
-(exact — one of `"low" | "normal" | "critical"`). Actions: `suppress`,
-`override_urgency`, `override_timeout_secs` (a single rule may combine
-multiple). A rule with no match fields is a catch-all and fires on every
-notification — always include at least one match field unless that's what
-you want.
+Broken regexes are logged (`skipping popup rule "<name>": …`) and
+dropped — they don't stop the popup from starting or affect the other
+rules. See `olha-popup/src/rules.rs` for the matching semantics and unit
+tests.
+
+---
 
 #### Regex syntax
 

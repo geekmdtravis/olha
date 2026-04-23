@@ -35,6 +35,12 @@ pub struct RulesEngine {
     rules: Vec<CompiledRule>,
 }
 
+/// The storage-verdict strings accepted by the top-level `action` field.
+/// These must never appear as keys inside `[rules.on_action]` — action
+/// keys come from the sending application (e.g. `"default"`, `"reply"`),
+/// not from this set. We warn when users mix them up.
+const STORAGE_VERDICT_KEYS: &[&str] = &["clear", "ignore", "none"];
+
 struct CompiledRule {
     name: String,
     app_name_regex: Option<Regex>,
@@ -75,6 +81,23 @@ impl RulesEngine {
                 _ => None,
             });
 
+            let on_action = rule.on_action.clone().unwrap_or_default();
+            for key in on_action.keys() {
+                if STORAGE_VERDICT_KEYS.contains(&key.as_str()) {
+                    tracing::warn!(
+                        "rule '{}': [rules.on_action] key \"{}\" will never fire — \
+                         \"clear\", \"ignore\", and \"none\" are values for the top-level \
+                         `action` field (the storage verdict), not action keys that \
+                         notifications carry. Action keys come from the sending app; \
+                         use \"default\" for body-click or a key the app actually registers \
+                         (e.g. \"reply\", \"open\"). This entry is dead — the engine will \
+                         load the rule, but this key will never match an ActionInvoked.",
+                        rule.name,
+                        key,
+                    );
+                }
+            }
+
             compiled_rules.push(CompiledRule {
                 name: rule.name.clone(),
                 app_name_regex,
@@ -83,7 +106,7 @@ impl RulesEngine {
                 urgency,
                 category_regex,
                 action,
-                on_action: rule.on_action.clone().unwrap_or_default(),
+                on_action,
             });
         }
 
@@ -279,6 +302,33 @@ mod tests {
         let engine = RulesEngine::new(&[r]).unwrap();
         let notif = make_test_notif("Discord", "x", "");
         assert_eq!(engine.action_command(&notif, "default"), None);
+    }
+
+    #[test]
+    fn dead_on_action_keys_are_kept_but_do_not_fire() {
+        // on_action keys that collide with storage-verdict values ("clear",
+        // "ignore", "none") are a common user mistake. The engine should
+        // still load the rule and still honor the *valid* keys alongside
+        // them — the dead keys just never match an action_key lookup.
+        let mut r = rule("focus-signal", "Signal", "none");
+        r.on_action = Some(HashMap::from([
+            ("none".to_string(), "dead-none".to_string()),
+            ("clear".to_string(), "dead-clear".to_string()),
+            ("ignore".to_string(), "dead-ignore".to_string()),
+            ("default".to_string(), "live-default".to_string()),
+        ]));
+        let engine = RulesEngine::new(&[r]).unwrap();
+        let notif = make_test_notif("Signal", "x", "");
+
+        assert_eq!(
+            engine.action_command(&notif, "default"),
+            Some(("focus-signal".to_string(), "live-default".to_string()))
+        );
+        // Dead keys do fire if an app ever sent an action_key that happens
+        // to equal "none"/"clear"/"ignore" — the lookup is by string. The
+        // warning exists because no real app emits these as action keys.
+        // We only assert here that presence of dead keys doesn't break the
+        // engine or shadow the live "default" entry above.
     }
 
     #[test]

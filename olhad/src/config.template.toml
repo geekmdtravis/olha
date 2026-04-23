@@ -28,3 +28,103 @@
 # gap         = 8             # px between stacked popups
 # width       = 380
 # height      = 120
+
+
+# ───────────────────────── Notification rules ─────────────────────────
+#
+# Two independent rule lists, two different moments in a notification's
+# life. Don't mix them up.
+#
+#   notify-send ─► [[rules]] ─► SQLite ─► [[popup.rules]] ─► popup
+#                  (olhad)                 (olha-popup only)
+#
+# • [[rules]]        — read by olhad. Controls *storage* and *click handlers*.
+# • [[popup.rules]]  — read by olha-popup. Controls *display only*; cannot
+#                      stop storage (olhad already stored the notification
+#                      by the time the popup sees it).
+#
+# Each list is evaluated in order; first match wins.
+# Regex fields use Rust's `regex` crate — unanchored and case-sensitive
+# by default. Prefer 'single-quoted' TOML literal strings for patterns so
+# you don't have to double-escape backslashes.
+#
+# ───────────────────── Daemon rules — [[rules]] ─────────────────────
+#
+# A daemon rule has a *match* part (regex/urgency/category conditions)
+# and a *verdict* part. The verdict has TWO pieces with confusingly
+# similar names, and they do different jobs at different moments:
+#
+#   `action`           (top-level scalar, REQUIRED)
+#       The STORAGE verdict. Applied once when the notification arrives.
+#       Exactly one of:
+#         "clear"  — store it, but mark it cleared immediately.
+#                    (Appears in `olha list`, but not as unread.)
+#         "ignore" — do not store at all. Vanishes completely.
+#         "none"   — store it normally (as unread). Use this when the
+#                    rule exists only to attach click handlers below.
+#
+#   [rules.on_action]  (nested table, OPTIONAL)
+#       Per-button CLICK handlers. Keys are *action keys the sending
+#       app registered* (e.g. "default" for body-click, "reply",
+#       "open") — NOT the storage-verdict values above. Values are
+#       shell commands run under `sh -c` when the user clicks.
+#       Available env vars: OLHA_APP_NAME, OLHA_SUMMARY, OLHA_BODY,
+#       OLHA_URGENCY, OLHA_ACTION_KEY, OLHA_DESKTOP_ENTRY,
+#       OLHA_NOTIFICATION_ID.
+#
+#       Pitfall: writing `none = "..."` or `clear = "..."` under
+#       [rules.on_action] does nothing — no real app emits those
+#       strings as action keys. olhad logs a warning at startup if it
+#       sees one. Use `default` or whatever key `olha show <id>`
+#       reveals the notification actually carries.
+#
+# Example 1 — auto-clear chatty notifications. Stored as cleared, no popup.
+# [[rules]]
+# name     = "mute-slack-threads"
+# app_name = "Slack"
+# summary  = "Thread:.*"
+# action   = "clear"
+#
+# Example 2 — drop entirely. Not stored, not popped, gone.
+# [[rules]]
+# name     = "ignore-spotify"
+# app_name = "Spotify"
+# action   = "ignore"
+#
+# Example 3 — store normally, but bind custom click handlers.
+# [[rules]]
+# name     = "focus-signal"
+# app_name = '^Signal$'
+# action   = "none"                     # leave storage alone
+#
+# [rules.on_action]
+# default = "signal-desktop --activate"  # body click
+# reply   = "notify-send 'Replied to $OLHA_SUMMARY'"
+#
+# ─────────────── Popup-only rules — [[popup.rules]] ───────────────
+#
+# Read by olha-popup only. These fire at DISPLAY time, after the
+# daemon has already stored the notification. They can:
+#
+#   suppress              = true           don't show the popup at all
+#   override_urgency      = "normal"       re-label for rendering only
+#   override_timeout_secs = 4              force a specific dismiss timeout
+#
+# A rule may combine several of these. Match fields are the same as
+# daemon rules (app_name, summary, body, urgency). A rule with *no*
+# match fields is a catch-all.
+#
+# [[popup.rules]]
+# name             = "demote-teams"
+# app_name         = '^Microsoft Teams$'
+# override_urgency = "normal"
+#
+# [[popup.rules]]
+# name     = "hide-spotify"
+# app_name = '^Spotify$'
+# suppress = true
+#
+# [[popup.rules]]
+# name                  = "short-timeout-for-slack"
+# app_name              = '^Slack$'
+# override_timeout_secs = 4

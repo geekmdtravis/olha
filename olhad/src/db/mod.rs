@@ -1,5 +1,5 @@
-pub mod schema;
 pub mod queries;
+pub mod schema;
 
 use rusqlite::Connection;
 use std::path::Path;

@@ -5,7 +5,6 @@ mod rules;
 
 use std::time::{Duration, Instant};
 
-use indexmap::IndexMap;
 use iced::widget::{button, column, container, row, text, Space};
 use iced::{alignment, Color, Element, Length, Padding, Subscription, Task, Theme};
 use iced_layershell::reexport::{
@@ -13,6 +12,7 @@ use iced_layershell::reexport::{
 };
 use iced_layershell::settings::{LayerShellSettings, Settings, StartMode};
 use iced_layershell::to_layer_message;
+use indexmap::IndexMap;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter};
@@ -401,7 +401,9 @@ fn popup_view(id: iced::window::Id, state: &PopupState) -> Element<'_, Message> 
     let header = row![
         text(state.app_name.as_str())
             .size(11)
-            .style(|_: &Theme| text::Style { color: Some(muted()) }),
+            .style(|_: &Theme| text::Style {
+                color: Some(muted())
+            }),
         Space::new().width(Length::Fill),
         button(text("×").size(16))
             .on_press(Message::Dismiss(id))
@@ -419,11 +421,9 @@ fn popup_view(id: iced::window::Id, state: &PopupState) -> Element<'_, Message> 
     let mut default_stack = column![summary].spacing(4);
     if !state.body.is_empty() {
         let body = truncate_body(&state.body, 220);
-        default_stack = default_stack.push(
-            text(body)
-                .size(12)
-                .style(|_: &Theme| text::Style { color: Some(subtle()) }),
-        );
+        default_stack = default_stack.push(text(body).size(12).style(|_: &Theme| text::Style {
+            color: Some(subtle()),
+        }));
     }
     let default_region: Element<'_, Message> = button(default_stack)
         .on_press(Message::ActionClicked(id, "default".to_string()))
@@ -519,11 +519,9 @@ fn subtle() -> Color {
 
 fn ghost_button_style(_theme: &Theme, status: button::Status) -> button::Style {
     let bg = match status {
-        button::Status::Hovered => {
-            Some(iced::Background::Color(Color::from_rgba8(
-                0xFF, 0xFF, 0xFF, 0.12,
-            )))
-        }
+        button::Status::Hovered => Some(iced::Background::Color(Color::from_rgba8(
+            0xFF, 0xFF, 0xFF, 0.12,
+        ))),
         _ => None,
     };
     button::Style {

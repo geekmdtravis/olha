@@ -206,7 +206,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
         }
 
-        Commands::Count { app, urgency, status, category, search, since, until, json } => {
+        Commands::Count {
+            app,
+            urgency,
+            status,
+            category,
+            search,
+            since,
+            until,
+            json,
+        } => {
             client::count(client::CountFilter {
                 app,
                 urgency,
@@ -216,7 +225,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 since,
                 until,
                 json,
-            }).await?;
+            })
+            .await?;
         }
 
         Commands::Show { id, json } => {

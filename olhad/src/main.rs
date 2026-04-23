@@ -1,19 +1,19 @@
-mod notification;
 mod config;
 mod db;
-mod launcher;
-mod rules;
 mod dbus;
+mod launcher;
+mod notification;
+mod rules;
 
+use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
-use clap::Parser;
 use tracing_subscriber;
 use zbus::Connection;
 
 use config::Config;
 use db::DbResult;
-use dbus::{NotificationsDaemon, ControlDaemon};
+use dbus::{ControlDaemon, NotificationsDaemon};
 use rules::RulesEngine;
 
 #[derive(Parser, Debug)]
@@ -49,9 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => tracing_subscriber::filter::LevelFilter::DEBUG,
     };
 
-    tracing_subscriber::fmt()
-        .with_max_level(log_level)
-        .init();
+    tracing_subscriber::fmt().with_max_level(log_level).init();
 
     // Load configuration
     let config = Config::load(None)?;
@@ -117,16 +115,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         // Check who currently owns the name
         let owner_info = match zbus::fdo::DBusProxy::new(&connection).await {
-            Ok(proxy) => match proxy.get_name_owner("org.freedesktop.Notifications".try_into().unwrap()).await {
+            Ok(proxy) => match proxy
+                .get_name_owner("org.freedesktop.Notifications".try_into().unwrap())
+                .await
+            {
                 Ok(owner) => {
                     // Try to get the PID of the owner
-                    match proxy.get_connection_unix_process_id(owner.clone().into()).await {
+                    match proxy
+                        .get_connection_unix_process_id(owner.clone().into())
+                        .await
+                    {
                         Ok(pid) => {
                             // Try to read the process name from /proc
                             let proc_name = std::fs::read_to_string(format!("/proc/{}/comm", pid))
                                 .map(|s| s.trim().to_string())
                                 .unwrap_or_else(|_| "unknown".to_string());
-                            format!(" Currently owned by '{}' (PID {}, bus name {}).", proc_name, pid, owner)
+                            format!(
+                                " Currently owned by '{}' (PID {}, bus name {}).",
+                                proc_name, pid, owner
+                            )
                         }
                         Err(_) => format!(" Currently owned by bus name {}.", owner),
                     }
@@ -149,7 +156,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Registered org.freedesktop.Notifications");
 
     if let Err(e) = connection.request_name("org.olha.Daemon").await {
-        tracing::error!("Failed to claim org.olha.Daemon: {}. Is another olhad instance running?", e);
+        tracing::error!(
+            "Failed to claim org.olha.Daemon: {}. Is another olhad instance running?",
+            e
+        );
         return Err(e.into());
     }
     tracing::info!("Registered org.olha.Daemon");
@@ -192,7 +202,11 @@ async fn cleanup_loop(db_path: PathBuf, config: Config) {
 }
 
 /// Run cleanup on old notifications
-fn cleanup_notifications(db_path: &std::path::Path, max_age_secs: u64, max_count: i64) -> DbResult<i64> {
+fn cleanup_notifications(
+    db_path: &std::path::Path,
+    max_age_secs: u64,
+    max_count: i64,
+) -> DbResult<i64> {
     let conn = rusqlite::Connection::open(db_path)?;
     db::queries::cleanup_old(&conn, max_age_secs, max_count)
 }

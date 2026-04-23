@@ -1,4 +1,4 @@
-use zbus::{Connection, proxy};
+use zbus::{proxy, Connection};
 
 use crate::model::Notification;
 

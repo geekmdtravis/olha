@@ -1,14 +1,14 @@
-use zbus::interface;
-use zbus::object_server::{InterfaceRef, SignalEmitter};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use zbus::interface;
+use zbus::object_server::{InterfaceRef, SignalEmitter};
 
-use crate::DaemonState;
+use crate::db::queries;
 use crate::dbus::olha::{ControlDaemon, ControlDaemonSignals};
 use crate::notification::{Action, Notification, NotificationStatus, Urgency};
 use crate::rules::RuleAction;
-use crate::db::queries;
+use crate::DaemonState;
 
 /// Freedesktop notification daemon (org.freedesktop.Notifications)
 #[derive(Clone)]
@@ -242,30 +242,34 @@ impl NotificationsDaemon {
 
         // Update in DB: find notification by dbus_id and mark as cleared
         match self.state.open_db() {
-            Ok(conn) => {
-                match queries::get_notification_by_dbus_id(&conn, id) {
-                    Ok(Some(notif)) => {
-                        if let Some(row_id) = notif.row_id {
-                            if let Err(e) = queries::update_status(&conn, row_id, NotificationStatus::Cleared) {
-                                tracing::error!("Failed to update notification status: {}", e);
-                            }
+            Ok(conn) => match queries::get_notification_by_dbus_id(&conn, id) {
+                Ok(Some(notif)) => {
+                    if let Some(row_id) = notif.row_id {
+                        if let Err(e) =
+                            queries::update_status(&conn, row_id, NotificationStatus::Cleared)
+                        {
+                            tracing::error!("Failed to update notification status: {}", e);
                         }
                     }
-                    Ok(None) => {
-                        tracing::debug!("CloseNotification: dbus_id={} not found in DB", id);
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to look up notification dbus_id={}: {}", id, e);
-                    }
                 }
-            }
+                Ok(None) => {
+                    tracing::debug!("CloseNotification: dbus_id={} not found in DB", id);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to look up notification dbus_id={}: {}", id, e);
+                }
+            },
             Err(e) => {
                 tracing::error!("Failed to open DB for CloseNotification: {}", e);
             }
         }
 
         if let Err(e) = Self::notification_closed(&emitter, id, 3).await {
-            tracing::error!("Failed to emit NotificationClosed(id={}, reason=3): {}", id, e);
+            tracing::error!(
+                "Failed to emit NotificationClosed(id={}, reason=3): {}",
+                id,
+                e
+            );
         }
 
         tracing::debug!("Notification closed: id={}", id);

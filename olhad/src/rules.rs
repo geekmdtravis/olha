@@ -233,7 +233,10 @@ mod tests {
     fn action_command_returns_first_matching_rule() {
         let mut r = rule("focus-signal", "Signal", "none");
         r.on_action = Some(HashMap::from([
-            ("default".to_string(), "signal-desktop --activate".to_string()),
+            (
+                "default".to_string(),
+                "signal-desktop --activate".to_string(),
+            ),
             ("reply".to_string(), "signal-reply".to_string()),
         ]));
         let engine = RulesEngine::new(&[r]).unwrap();
@@ -242,10 +245,16 @@ mod tests {
         let cmd = engine.action_command(&notif, "default");
         assert_eq!(
             cmd,
-            Some(("focus-signal".to_string(), "signal-desktop --activate".to_string()))
+            Some((
+                "focus-signal".to_string(),
+                "signal-desktop --activate".to_string()
+            ))
         );
         let cmd = engine.action_command(&notif, "reply");
-        assert_eq!(cmd, Some(("focus-signal".to_string(), "signal-reply".to_string())));
+        assert_eq!(
+            cmd,
+            Some(("focus-signal".to_string(), "signal-reply".to_string()))
+        );
     }
 
     #[test]

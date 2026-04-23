@@ -166,10 +166,9 @@ impl Config {
         if !explicit && !path.exists() {
             match write_default_config(&path) {
                 Ok(()) => tracing::info!("wrote default config to {}", path.display()),
-                Err(e) => tracing::warn!(
-                    "could not create default config at {}: {e}",
-                    path.display()
-                ),
+                Err(e) => {
+                    tracing::warn!("could not create default config at {}: {e}", path.display())
+                }
             }
         }
 

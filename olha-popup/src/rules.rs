@@ -36,7 +36,11 @@ impl PopupRules {
                 Err(e) => {
                     tracing::warn!(
                         "skipping popup rule {:?}: {e}",
-                        if r.name.is_empty() { "(unnamed)" } else { &r.name }
+                        if r.name.is_empty() {
+                            "(unnamed)"
+                        } else {
+                            &r.name
+                        }
                     );
                 }
             }
@@ -150,9 +154,22 @@ mod tests {
             suppress = true
             "#,
         );
-        assert!(rules.evaluate(&notif("Slack", "", "", Urgency::Normal)).suppress);
-        assert!(rules.evaluate(&notif("Slack Desktop", "", "", Urgency::Normal)).suppress);
-        assert!(rules.evaluate(&notif("slackware", "hi", "", Urgency::Normal)).suppress == false);
+        assert!(
+            rules
+                .evaluate(&notif("Slack", "", "", Urgency::Normal))
+                .suppress
+        );
+        assert!(
+            rules
+                .evaluate(&notif("Slack Desktop", "", "", Urgency::Normal))
+                .suppress
+        );
+        assert!(
+            rules
+                .evaluate(&notif("slackware", "hi", "", Urgency::Normal))
+                .suppress
+                == false
+        );
     }
 
     #[test]
@@ -183,8 +200,16 @@ mod tests {
             suppress = true
             "#,
         );
-        assert!(literal.evaluate(&notif("", "v1.0", "", Urgency::Normal)).suppress);
-        assert!(!literal.evaluate(&notif("", "v1x0", "", Urgency::Normal)).suppress);
+        assert!(
+            literal
+                .evaluate(&notif("", "v1.0", "", Urgency::Normal))
+                .suppress
+        );
+        assert!(
+            !literal
+                .evaluate(&notif("", "v1x0", "", Urgency::Normal))
+                .suppress
+        );
 
         // Same pattern written as a TOML basic (double-quoted) string needs
         // the backslash doubled — TOML eats one layer, regex eats the
@@ -197,8 +222,16 @@ mod tests {
             suppress = true
             "#,
         );
-        assert!(basic.evaluate(&notif("", "v1.0", "", Urgency::Normal)).suppress);
-        assert!(!basic.evaluate(&notif("", "v1x0", "", Urgency::Normal)).suppress);
+        assert!(
+            basic
+                .evaluate(&notif("", "v1.0", "", Urgency::Normal))
+                .suppress
+        );
+        assert!(
+            !basic
+                .evaluate(&notif("", "v1x0", "", Urgency::Normal))
+                .suppress
+        );
     }
 
     #[test]
@@ -211,7 +244,11 @@ mod tests {
             suppress = true
             "#,
         );
-        assert!(!sensitive.evaluate(&notif("Slack", "", "", Urgency::Normal)).suppress);
+        assert!(
+            !sensitive
+                .evaluate(&notif("Slack", "", "", Urgency::Normal))
+                .suppress
+        );
 
         let insensitive = build(
             r#"
@@ -221,7 +258,11 @@ mod tests {
             suppress = true
             "#,
         );
-        assert!(insensitive.evaluate(&notif("Slack", "", "", Urgency::Normal)).suppress);
+        assert!(
+            insensitive
+                .evaluate(&notif("Slack", "", "", Urgency::Normal))
+                .suppress
+        );
     }
 
     #[test]
@@ -236,11 +277,23 @@ mod tests {
             "#,
         );
         // Both match.
-        assert!(rules.evaluate(&notif("Slack", "Thread: foo", "", Urgency::Normal)).suppress);
+        assert!(
+            rules
+                .evaluate(&notif("Slack", "Thread: foo", "", Urgency::Normal))
+                .suppress
+        );
         // Only app_name matches.
-        assert!(!rules.evaluate(&notif("Slack", "DM", "", Urgency::Normal)).suppress);
+        assert!(
+            !rules
+                .evaluate(&notif("Slack", "DM", "", Urgency::Normal))
+                .suppress
+        );
         // Only summary matches.
-        assert!(!rules.evaluate(&notif("Discord", "Thread: foo", "", Urgency::Normal)).suppress);
+        assert!(
+            !rules
+                .evaluate(&notif("Discord", "Thread: foo", "", Urgency::Normal))
+                .suppress
+        );
     }
 
     #[test]
@@ -254,11 +307,15 @@ mod tests {
             "#,
         );
         assert_eq!(
-            rules.evaluate(&notif("X", "", "", Urgency::Critical)).override_timeout_secs,
+            rules
+                .evaluate(&notif("X", "", "", Urgency::Critical))
+                .override_timeout_secs,
             Some(5),
         );
         assert_eq!(
-            rules.evaluate(&notif("X", "", "", Urgency::Normal)).override_timeout_secs,
+            rules
+                .evaluate(&notif("X", "", "", Urgency::Normal))
+                .override_timeout_secs,
             None,
         );
     }
@@ -313,7 +370,11 @@ mod tests {
             suppress = true
             "#,
         );
-        assert!(rules.evaluate(&notif("Anything", "At all", "", Urgency::Low)).suppress);
+        assert!(
+            rules
+                .evaluate(&notif("Anything", "At all", "", Urgency::Low))
+                .suppress
+        );
     }
 
     // ---- action propagation ----
@@ -345,7 +406,11 @@ mod tests {
             suppress = true
             "#,
         );
-        assert!(rules.evaluate(&notif("Spotify", "", "", Urgency::Low)).suppress);
+        assert!(
+            rules
+                .evaluate(&notif("Spotify", "", "", Urgency::Low))
+                .suppress
+        );
     }
 
     // ---- compile errors ----

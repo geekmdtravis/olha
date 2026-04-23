@@ -53,7 +53,9 @@ pub struct CountFilter {
 /// Maps the common "daemon not running" failure mode into a friendly message.
 async fn connect() -> Result<ControlDaemonProxy<'static>, Box<dyn std::error::Error>> {
     let connection = zbus::Connection::session().await?;
-    let proxy = ControlDaemonProxy::new(&connection).await.map_err(map_proxy_error)?;
+    let proxy = ControlDaemonProxy::new(&connection)
+        .await
+        .map_err(map_proxy_error)?;
     Ok(proxy)
 }
 
@@ -252,7 +254,10 @@ pub async fn subscribe(json: bool) -> Result<(), Box<dyn std::error::Error>> {
                 let app = val.get("app_name").and_then(|v| v.as_str()).unwrap_or("");
                 let summary = val.get("summary").and_then(|v| v.as_str()).unwrap_or("");
                 let body = val.get("body").and_then(|v| v.as_str()).unwrap_or("");
-                let urgency = val.get("urgency").and_then(|v| v.as_str()).unwrap_or("normal");
+                let urgency = val
+                    .get("urgency")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("normal");
 
                 if body.is_empty() {
                     println!("[{}] [{}] {}", urgency, app, summary);

@@ -1,6 +1,7 @@
 use crate::config::NotificationRule;
 use crate::notification::Notification;
 use regex::Regex;
+use std::collections::HashMap;
 
 /// Action to take on a notification that matches a rule
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9,6 +10,8 @@ pub enum RuleAction {
     Clear,
     /// Ignore the notification (don't store in DB)
     Ignore,
+    /// Do nothing — the rule exists only to attach `on_action` handlers
+    None,
 }
 
 /// Result of evaluating rules against a notification
@@ -40,6 +43,8 @@ struct CompiledRule {
     urgency: Option<u32>,
     category_regex: Option<Regex>,
     action: RuleAction,
+    /// action_key -> shell command
+    on_action: HashMap<String, String>,
 }
 
 impl RulesEngine {
@@ -51,8 +56,8 @@ impl RulesEngine {
             let action = match rule.action.as_str() {
                 "clear" => RuleAction::Clear,
                 "ignore" => RuleAction::Ignore,
-                _ if rule.action.starts_with("exec:") => RuleAction::Clear, // exec not implemented yet
-                _ => continue,                                              // skip unknown actions
+                "none" => RuleAction::None,
+                _ => continue, // skip unknown actions
             };
 
             let app_name_regex = rule.app_name.as_ref().map(|s| Regex::new(s)).transpose()?;
@@ -78,6 +83,7 @@ impl RulesEngine {
                 urgency,
                 category_regex,
                 action,
+                on_action: rule.on_action.clone().unwrap_or_default(),
             });
         }
 
@@ -98,6 +104,25 @@ impl RulesEngine {
         }
 
         RuleResult::none()
+    }
+
+    /// Find the shell command to run for `action_key` on `notif`. Walks rules
+    /// in order and returns the first match that also has an `on_action` entry
+    /// for this key. Returns `(rule_name, command)`.
+    pub fn action_command(
+        &self,
+        notif: &Notification,
+        action_key: &str,
+    ) -> Option<(String, String)> {
+        for rule in &self.rules {
+            if !self.matches_rule(notif, rule) {
+                continue;
+            }
+            if let Some(cmd) = rule.on_action.get(action_key) {
+                return Some((rule.name.clone(), cmd.clone()));
+            }
+        }
+        None
     }
 
     fn matches_rule(&self, notif: &Notification, rule: &CompiledRule) -> bool {
@@ -162,18 +187,22 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_rule_matching() {
-        let rules = vec![NotificationRule {
-            name: "test".to_string(),
-            app_name: Some("Slack".to_string()),
+    fn rule(name: &str, app: &str, action: &str) -> NotificationRule {
+        NotificationRule {
+            name: name.to_string(),
+            app_name: Some(app.to_string()),
             summary: None,
             body: None,
             urgency: None,
             category: None,
-            action: "clear".to_string(),
-        }];
+            action: action.to_string(),
+            on_action: None,
+        }
+    }
 
+    #[test]
+    fn test_rule_matching() {
+        let rules = vec![rule("test", "Slack", "clear")];
         let engine = RulesEngine::new(&rules).unwrap();
         let notif = make_test_notif("Slack", "New message", "");
 
@@ -184,20 +213,82 @@ mod tests {
 
     #[test]
     fn test_no_match() {
-        let rules = vec![NotificationRule {
-            name: "test".to_string(),
-            app_name: Some("Slack".to_string()),
-            summary: None,
-            body: None,
-            urgency: None,
-            category: None,
-            action: "clear".to_string(),
-        }];
-
+        let rules = vec![rule("test", "Slack", "clear")];
         let engine = RulesEngine::new(&rules).unwrap();
         let notif = make_test_notif("Discord", "New message", "");
 
         let result = engine.evaluate(&notif);
         assert_eq!(result.action, None);
+    }
+
+    #[test]
+    fn action_none_variant_is_recognized() {
+        let rules = vec![rule("keeper", "Slack", "none")];
+        let engine = RulesEngine::new(&rules).unwrap();
+        let result = engine.evaluate(&make_test_notif("Slack", "x", ""));
+        assert_eq!(result.action, Some(RuleAction::None));
+    }
+
+    #[test]
+    fn action_command_returns_first_matching_rule() {
+        let mut r = rule("focus-signal", "Signal", "none");
+        r.on_action = Some(HashMap::from([
+            ("default".to_string(), "signal-desktop --activate".to_string()),
+            ("reply".to_string(), "signal-reply".to_string()),
+        ]));
+        let engine = RulesEngine::new(&[r]).unwrap();
+        let notif = make_test_notif("Signal", "New message", "");
+
+        let cmd = engine.action_command(&notif, "default");
+        assert_eq!(
+            cmd,
+            Some(("focus-signal".to_string(), "signal-desktop --activate".to_string()))
+        );
+        let cmd = engine.action_command(&notif, "reply");
+        assert_eq!(cmd, Some(("focus-signal".to_string(), "signal-reply".to_string())));
+    }
+
+    #[test]
+    fn action_command_returns_none_when_key_absent() {
+        let mut r = rule("focus-signal", "Signal", "none");
+        r.on_action = Some(HashMap::from([(
+            "default".to_string(),
+            "signal-desktop --activate".to_string(),
+        )]));
+        let engine = RulesEngine::new(&[r]).unwrap();
+        let notif = make_test_notif("Signal", "x", "");
+        assert_eq!(engine.action_command(&notif, "snooze"), None);
+    }
+
+    #[test]
+    fn action_command_returns_none_when_no_rule_matches() {
+        let mut r = rule("focus-signal", "Signal", "none");
+        r.on_action = Some(HashMap::from([(
+            "default".to_string(),
+            "signal-desktop --activate".to_string(),
+        )]));
+        let engine = RulesEngine::new(&[r]).unwrap();
+        let notif = make_test_notif("Discord", "x", "");
+        assert_eq!(engine.action_command(&notif, "default"), None);
+    }
+
+    #[test]
+    fn action_command_respects_rule_order() {
+        let mut first = rule("first", "Signal", "none");
+        first.on_action = Some(HashMap::from([(
+            "default".to_string(),
+            "first-cmd".to_string(),
+        )]));
+        let mut second = rule("second", "Signal", "none");
+        second.on_action = Some(HashMap::from([(
+            "default".to_string(),
+            "second-cmd".to_string(),
+        )]));
+        let engine = RulesEngine::new(&[first, second]).unwrap();
+        let notif = make_test_notif("Signal", "x", "");
+        assert_eq!(
+            engine.action_command(&notif, "default"),
+            Some(("first".to_string(), "first-cmd".to_string()))
+        );
     }
 }

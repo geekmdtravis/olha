@@ -1,6 +1,7 @@
 mod notification;
 mod config;
 mod db;
+mod launcher;
 mod rules;
 mod dbus;
 

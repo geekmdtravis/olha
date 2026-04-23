@@ -6,7 +6,8 @@ use tracing;
 
 use crate::DaemonState;
 use crate::dbus::freedesktop::{NotificationsDaemon, NotificationsDaemonSignals};
-use crate::notification::{NotificationStatus, Urgency};
+use crate::launcher;
+use crate::notification::{Notification, NotificationStatus, Urgency};
 use crate::db::queries::{self, NotificationFilter};
 
 /// Control daemon for olha (org.olha.Daemon)
@@ -260,6 +261,38 @@ impl ControlDaemon {
             }
         }
 
+        // Local handler: a user rule with an `on_action` entry for this key
+        // wins; otherwise, if the invoked action is "default" and the
+        // notification carried a `desktop-entry` hint, focus/launch that
+        // app via `gtk-launch`. Both paths are best-effort — a failure here
+        // never undoes the FDO signal the client already received.
+        if let Some((rule_name, cmd)) =
+            self.state.rules_engine.action_command(&notif, &action_key)
+        {
+            let env = env_from_notif(&notif, &action_key);
+            tracing::debug!(
+                "rule '{}' -> spawning shell command for action '{}'",
+                rule_name,
+                action_key,
+            );
+            if let Err(e) = launcher::spawn_shell_command(&cmd, &env).await {
+                tracing::warn!(
+                    "rule '{}' command failed to spawn: {}",
+                    rule_name,
+                    e,
+                );
+            }
+        } else if action_key == "default" && !notif.desktop_entry.is_empty() {
+            tracing::debug!("desktop-entry activation: {}", notif.desktop_entry);
+            if let Err(e) = launcher::activate_desktop_entry(&notif.desktop_entry).await {
+                tracing::warn!(
+                    "gtk-launch {} failed: {}",
+                    notif.desktop_entry,
+                    e,
+                );
+            }
+        }
+
         tracing::debug!(
             "Invoked action '{}' on notification row {} (dbus_id {})",
             action_key,
@@ -369,6 +402,27 @@ impl ControlDaemon {
     pub fn new(state: Arc<DaemonState>, connection: zbus::Connection) -> Self {
         Self { state, connection }
     }
+}
+
+/// Build the env var list handed to a rule's `on_action` shell command.
+fn env_from_notif(notif: &Notification, action_key: &str) -> Vec<(&'static str, String)> {
+    let urgency = match notif.urgency {
+        Urgency::Low => "low",
+        Urgency::Normal => "normal",
+        Urgency::Critical => "critical",
+    };
+    vec![
+        ("OLHA_APP_NAME", notif.app_name.clone()),
+        ("OLHA_SUMMARY", notif.summary.clone()),
+        ("OLHA_BODY", notif.body.clone()),
+        ("OLHA_URGENCY", urgency.to_string()),
+        ("OLHA_ACTION_KEY", action_key.to_string()),
+        ("OLHA_DESKTOP_ENTRY", notif.desktop_entry.clone()),
+        (
+            "OLHA_NOTIFICATION_ID",
+            notif.row_id.map(|r| r.to_string()).unwrap_or_default(),
+        ),
+    ]
 }
 
 /// Parse a JSON filter string into a NotificationFilter

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -26,8 +27,14 @@ pub struct NotificationRule {
     pub urgency: Option<String>,
     #[serde(default)]
     pub category: Option<String>,
-    /// "clear", "ignore", or "exec:command"
+    /// "clear", "ignore", or "none". "none" keeps the notification as-is —
+    /// useful when the rule exists only to attach `on_action` handlers.
     pub action: String,
+    /// Map of action key (e.g. "default", "reply") → shell command. When the
+    /// user invokes the action in the popup, the command is spawned under
+    /// `sh -c` with notification context exposed via `OLHA_*` env vars.
+    #[serde(default)]
+    pub on_action: Option<HashMap<String, String>>,
 }
 
 /// Main configuration

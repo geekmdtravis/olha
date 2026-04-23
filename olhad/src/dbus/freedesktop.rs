@@ -205,8 +205,9 @@ impl NotificationsDaemon {
                 }
                 return Ok(id);
             }
-            None => {
-                // Normal flow: store as unread
+            Some(RuleAction::None) | None => {
+                // Normal flow: store as unread. A `None` rule matched but
+                // only carries on_action handlers, which fire at invoke time.
             }
         }
 

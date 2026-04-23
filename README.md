@@ -157,12 +157,50 @@ Rules are regex-based and support matching on:
 When a notification matches **all** specified fields in a rule, the action is taken:
 - `clear` — automatically dismiss the notification (marks as cleared)
 - `ignore` — don't store the notification in the database at all
+- `none` — store normally; pair with `on_action` (below) to bind clicks without altering storage
 
 Patterns are compiled with Rust's [`regex`](https://docs.rs/regex) crate —
 unanchored and case-sensitive by default. See
 [Regex syntax](#regex-syntax) under the popup-rules section below for
 anchoring, `(?i)` flags, and the TOML escaping foot-gun (prefer
 `'single-quoted'` strings for patterns).
+
+#### Click handlers: `on_action`
+
+`olha` emits `ActionInvoked` on the D-Bus interface when the user clicks a
+popup button or body. For a running app that's subscribed to the FDO
+interface (most GUI clients), the app handles the click itself. When the
+sender isn't subscribed — or you want to make the daemon do something
+locally — two mechanisms take over:
+
+1. **Default desktop-entry activation.** If a notification carries a
+   `desktop-entry` hint and the user invokes the implicit `"default"`
+   action (body click), `olha` runs `gtk-launch <entry>`, which focuses or
+   starts the app. No config required.
+2. **Per-rule shell commands.** Attach an `on_action` map to any rule to
+   override step 1 or bind additional action keys:
+
+   ```toml
+   [[rules]]
+   name     = "focus-signal"
+   app_name = '^Signal$'
+   action   = "none"
+
+   [rules.on_action]
+   default = "signal-desktop --activate"
+   reply   = "notify-send 'Replied to $OLHA_SUMMARY'"
+   ```
+
+   When the user clicks the matching popup, `olha` spawns the command
+   under `sh -c` with these env vars available:
+
+   - `OLHA_APP_NAME`, `OLHA_SUMMARY`, `OLHA_BODY`
+   - `OLHA_URGENCY` (`low` / `normal` / `critical`)
+   - `OLHA_ACTION_KEY` (which button was clicked)
+   - `OLHA_DESKTOP_ENTRY`, `OLHA_NOTIFICATION_ID`
+
+   A rule command always wins over desktop-entry activation. FDO signal
+   emission is unchanged — subscribed senders still see `ActionInvoked`.
 
 ### Popup-side Rules
 

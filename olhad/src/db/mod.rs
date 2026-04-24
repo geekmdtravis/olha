@@ -1,3 +1,4 @@
+pub mod encryption;
 pub mod queries;
 pub mod schema;
 
@@ -11,6 +12,8 @@ pub enum DbError {
     Rusqlite(#[from] rusqlite::Error),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Encryption error: {0}")]
+    Encryption(String),
 }
 
 pub type DbResult<T> = Result<T, DbError>;

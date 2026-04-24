@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Do Not Disturb mode. `olha dnd [status|on|off|toggle]` flips a
+  runtime flag that the daemon persists to a new `meta` KV table in
+  SQLite, so it survives restarts. While DND is on, notifications are
+  still stored in history but the `notification_received` signal is
+  suppressed — `olha-popup` and `olha subscribe` stay quiet. Critical
+  urgency breaks through by default; set `[dnd].allow_critical = false`
+  in `config.toml` to silence everything. `org.olha.Daemon` gains
+  `GetDnd`, `SetDnd`, and a `DndChanged` signal; `olha status` shows
+  the current DND state.
 - New workspace crate `olha-popup`: a native Wayland (wlr-layer-shell) notifier
   built on iced + iced_layershell. Replaces the Alacritty-per-notification
   shell recipe with stacked, actionable popups — clicking an action button

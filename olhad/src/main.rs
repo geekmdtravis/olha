@@ -7,11 +7,13 @@ mod rules;
 
 use clap::Parser;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing_subscriber;
 use zbus::Connection;
 
 use config::Config;
+use db::encryption::EncryptionContext;
 use db::DbResult;
 use dbus::{ControlDaemon, NotificationsDaemon};
 use rules::RulesEngine;
@@ -22,6 +24,14 @@ struct Cli {
     /// Increase output verbosity (-v for warning, -vv for info, -vvv for debug)
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
+
+    /// Start without unlocking the data encryption key. Encrypted rows
+    /// are served as `[encrypted]` placeholders and any incoming
+    /// notification that would require encryption is rejected. Intended
+    /// only for recovery — e.g. if `pass show` is wedged and you need
+    /// to inspect or delete old rows.
+    #[arg(long)]
+    allow_degraded_read: bool,
 }
 
 /// Shared daemon state accessible by all D-Bus handlers
@@ -29,12 +39,40 @@ pub struct DaemonState {
     pub config: Config,
     pub db_path: PathBuf,
     pub rules_engine: RulesEngine,
+    /// Data encryption context when `[encryption].enabled = true` in
+    /// config AND the daemon successfully unlocked the DEK at startup.
+    /// `None` means plaintext mode — either encryption is off, or we
+    /// started with `--allow-degraded-read` for recovery.
+    pub encryption: Option<Arc<EncryptionContext>>,
+    /// Runtime Do Not Disturb toggle. Persisted to the `meta` table in
+    /// SQLite so it survives daemon restarts. Read on every incoming
+    /// notification, so it's an atomic rather than a lock.
+    pub dnd_enabled: AtomicBool,
 }
 
 impl DaemonState {
     /// Open a new database connection (cheap with bundled SQLite)
     pub fn open_db(&self) -> Result<rusqlite::Connection, db::DbError> {
         Ok(rusqlite::Connection::open(&self.db_path)?)
+    }
+
+    /// Borrow the encryption context (if loaded) for threading into
+    /// query calls. Most DB ops require an `Option<&EncryptionContext>`.
+    pub fn enc(&self) -> Option<&EncryptionContext> {
+        self.encryption.as_deref()
+    }
+
+    /// True when encryption is configured but no DEK is loaded — i.e.
+    /// the daemon was started with `--allow-degraded-read`. In this
+    /// mode, new notifications that would be encrypted must be
+    /// rejected rather than stored plaintext.
+    pub fn is_degraded(&self) -> bool {
+        self.config.encryption.enabled && self.encryption.is_none()
+    }
+
+    /// Cheap read of the current DND state.
+    pub fn is_dnd(&self) -> bool {
+        self.dnd_enabled.load(Ordering::Relaxed)
     }
 }
 
@@ -65,8 +103,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     launcher::init_session_env();
 
     // Initialize database
-    let _conn = db::init(&db_path)?;
+    let init_conn = db::init(&db_path)?;
     tracing::info!("Database initialized");
+
+    // Load persisted DND state. Missing or malformed → default off.
+    let dnd_enabled = match db::queries::get_meta(&init_conn, "dnd_enabled") {
+        Ok(Some(v)) => v == "true",
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!("failed to read dnd_enabled from meta: {e}; defaulting to off");
+            false
+        }
+    };
+    if dnd_enabled {
+        tracing::info!("DND is enabled (persisted from previous run)");
+    }
+    drop(init_conn);
+
+    // Unlock the DEK before anything else gets a chance to write an
+    // unencrypted notification. Three outcomes:
+    //   - encryption disabled in config → no DEK, plaintext mode
+    //   - enabled + pass unlocks        → DEK loaded, full encryption
+    //   - enabled + pass fails + flag   → degraded read-only mode
+    //   - enabled + pass fails + !flag  → fail closed (exit)
+    let encryption = if config.encryption.enabled {
+        match EncryptionContext::load_from_pass(&config.encryption.pass_entry) {
+            Ok(ctx) => {
+                let kid = ctx.key_id();
+                tracing::info!(
+                    "encryption enabled; loaded DEK from pass entry '{}' (key_id={:02x}{:02x}{:02x}{:02x})",
+                    config.encryption.pass_entry,
+                    kid[0], kid[1], kid[2], kid[3],
+                );
+                Some(Arc::new(ctx))
+            }
+            Err(e) if cli.allow_degraded_read => {
+                tracing::warn!(
+                    "failed to load DEK ({e}); continuing in --allow-degraded-read mode. \
+                     New notifications will be rejected and encrypted rows will be opaque."
+                );
+                None
+            }
+            Err(e) => {
+                tracing::error!(
+                    "encryption is enabled in config but the DEK could not be loaded: {e}\n\
+                     Either run `olha encryption init` + `olha encryption enable` first, or \
+                     start olhad once with `--allow-degraded-read` for recovery."
+                );
+                return Err(e.into());
+            }
+        }
+    } else {
+        None
+    };
 
     // Create rules engine
     let rules_engine = RulesEngine::new(&config.rules).map_err(|e| {
@@ -80,6 +169,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config: config.clone(),
         db_path: db_path.clone(),
         rules_engine,
+        encryption,
+        dnd_enabled: AtomicBool::new(dnd_enabled),
     });
 
     // Create D-Bus connection

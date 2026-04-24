@@ -1,9 +1,10 @@
 mod client;
+mod encryption;
 mod output;
 
 use std::path::PathBuf;
 
-use clap::{CommandFactory, Parser, Subcommand, ValueHint};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
 use clap_complete::{CompleteEnv, Shell};
 
 #[derive(Parser)]
@@ -153,6 +154,22 @@ enum Commands {
         json: bool,
     },
 
+    /// Query or toggle Do Not Disturb. With no action, prints current state.
+    ///
+    /// While DND is on, incoming notifications are still stored in
+    /// history but popups are silenced. Critical urgency notifications
+    /// break through unless you set `dnd.allow_critical = false` in
+    /// config.toml.
+    Dnd {
+        /// Action to take. Omit to show current state.
+        #[arg(value_enum)]
+        action: Option<DndActionArg>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Install shell tab completions
     InstallCompletion {
         /// Shell to generate completions for
@@ -162,6 +179,88 @@ enum Commands {
         /// Custom output path (optional)
         #[arg(short, long, value_hint = ValueHint::FilePath)]
         output: Option<PathBuf>,
+    },
+
+    /// Manage at-rest encryption of stored notifications
+    #[command(subcommand)]
+    Encryption(EncryptionCmd),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DndActionArg {
+    Status,
+    On,
+    Off,
+    Toggle,
+}
+
+impl From<DndActionArg> for client::DndAction {
+    fn from(a: DndActionArg) -> Self {
+        match a {
+            DndActionArg::Status => client::DndAction::Status,
+            DndActionArg::On => client::DndAction::On,
+            DndActionArg::Off => client::DndAction::Off,
+            DndActionArg::Toggle => client::DndAction::Toggle,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum EncryptionCmd {
+    /// Generate a 32-byte data encryption key and stash it in `pass`
+    Init {
+        /// Pass entry path (default: olha/db-key)
+        #[arg(long, default_value = "olha/db-key")]
+        pass_entry: String,
+
+        /// Overwrite an existing pass entry (any rows encrypted under
+        /// the old key become permanently unreadable).
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Verify the DEK unlocks, wipe existing plaintext rows, and flip
+    /// the `[encryption].enabled` flag in config.toml.
+    Enable {
+        #[arg(long, default_value = "olha/db-key")]
+        pass_entry: String,
+
+        /// Custom config path (default: XDG config location)
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        config: Option<PathBuf>,
+
+        /// Custom DB path (default: read from config)
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        db: Option<PathBuf>,
+
+        /// Skip the "delete N rows?" confirmation prompt.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+
+    /// Report config state, DEK availability, and row counts.
+    Status {
+        #[arg(long, default_value = "")]
+        pass_entry: String,
+
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        config: Option<PathBuf>,
+
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        db: Option<PathBuf>,
+    },
+
+    /// Generate a new DEK and re-encrypt every row under it. Stop
+    /// `olhad` first — concurrent writes will corrupt the rotation.
+    Rotate {
+        #[arg(long, default_value = "olha/db-key")]
+        pass_entry: String,
+
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        config: Option<PathBuf>,
+
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        db: Option<PathBuf>,
     },
 }
 
@@ -257,9 +356,44 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             client::status(json).await?;
         }
 
+        Commands::Dnd { action, json } => {
+            let act = action
+                .map(client::DndAction::from)
+                .unwrap_or(client::DndAction::Status);
+            client::dnd(act, json).await?;
+        }
+
         Commands::InstallCompletion { shell, output } => {
             cmd_install_completion(shell, output)?;
         }
+
+        Commands::Encryption(sub) => match sub {
+            EncryptionCmd::Init { pass_entry, force } => {
+                encryption::init(&pass_entry, force)?;
+            }
+            EncryptionCmd::Enable {
+                pass_entry,
+                config,
+                db,
+                yes,
+            } => {
+                encryption::enable(&pass_entry, config.as_deref(), db.as_deref(), yes)?;
+            }
+            EncryptionCmd::Status {
+                pass_entry,
+                config,
+                db,
+            } => {
+                encryption::status(&pass_entry, config.as_deref(), db.as_deref())?;
+            }
+            EncryptionCmd::Rotate {
+                pass_entry,
+                config,
+                db,
+            } => {
+                encryption::rotate(&pass_entry, config.as_deref(), db.as_deref())?;
+            }
+        },
     }
 
     Ok(())

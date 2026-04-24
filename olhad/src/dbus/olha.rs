@@ -1,4 +1,5 @@
 use serde_json;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tracing;
 use zbus::interface;
@@ -31,7 +32,7 @@ impl ControlDaemon {
             .open_db()
             .map_err(|e| zbus::fdo::Error::Failed(format!("Database error: {}", e)))?;
 
-        let notifications = queries::query_notifications(&conn, &notif_filter)
+        let notifications = queries::query_notifications(&conn, &notif_filter, self.state.enc())
             .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?;
 
         let json = serde_json::to_string(&notifications)
@@ -52,10 +53,10 @@ impl ControlDaemon {
 
         let mut unread_filter = base_filter.clone();
         unread_filter.status = Some(NotificationStatus::Unread);
-        let unread = queries::count_notifications(&conn, &unread_filter)
+        let unread = queries::count_notifications(&conn, &unread_filter, self.state.enc())
             .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?;
 
-        let total = queries::count_notifications(&conn, &base_filter)
+        let total = queries::count_notifications(&conn, &base_filter, self.state.enc())
             .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?;
 
         let result = serde_json::json!({
@@ -165,7 +166,7 @@ impl ControlDaemon {
             .open_db()
             .map_err(|e| zbus::fdo::Error::Failed(format!("Database error: {}", e)))?;
 
-        let notif = queries::get_notification(&conn, id as i64)
+        let notif = queries::get_notification(&conn, id as i64, self.state.enc())
             .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?;
 
         let json = serde_json::to_string(&notif)
@@ -188,7 +189,7 @@ impl ControlDaemon {
             .open_db()
             .map_err(|e| zbus::fdo::Error::Failed(format!("Database error: {}", e)))?;
 
-        let notif = queries::get_notification(&conn, id as i64)
+        let notif = queries::get_notification(&conn, id as i64, self.state.enc())
             .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?
             .ok_or_else(|| {
                 tracing::debug!("InvokeAction: notification row_id={} not found", id);
@@ -300,7 +301,7 @@ impl ControlDaemon {
             .open_db()
             .map_err(|e| zbus::fdo::Error::Failed(format!("Database error: {}", e)))?;
 
-        let notif = queries::get_notification(&conn, id as i64)
+        let notif = queries::get_notification(&conn, id as i64, self.state.enc())
             .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?
             .ok_or_else(|| {
                 tracing::debug!("Dismiss: notification row_id={} not found", id);
@@ -352,6 +353,51 @@ impl ControlDaemon {
         notification: &str,
     ) -> zbus::Result<()>;
 
+    /// Return the Do Not Disturb state as JSON:
+    /// `{"enabled": bool, "allow_critical": bool}`. `allow_critical`
+    /// comes from `[dnd]` in `config.toml` and is static for the life
+    /// of the daemon process; `enabled` is runtime-toggleable via
+    /// `set_dnd`.
+    async fn get_dnd(&self) -> Result<String, zbus::fdo::Error> {
+        let payload = serde_json::json!({
+            "enabled": self.state.is_dnd(),
+            "allow_critical": self.state.config.dnd.allow_critical,
+        });
+        Ok(payload.to_string())
+    }
+
+    /// Set the Do Not Disturb toggle. Persists to the `meta` table
+    /// so the state survives daemon restarts, updates the in-memory
+    /// atomic, and fires `dnd_changed` so reactive clients (popup,
+    /// status bars) can refresh without polling.
+    async fn set_dnd(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        enabled: bool,
+    ) -> Result<(), zbus::fdo::Error> {
+        let conn = self
+            .state
+            .open_db()
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Database error: {}", e)))?;
+
+        queries::set_meta(&conn, "dnd_enabled", if enabled { "true" } else { "false" })
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to persist DND: {}", e)))?;
+
+        self.state.dnd_enabled.store(enabled, Ordering::Relaxed);
+        tracing::info!("DND {}", if enabled { "enabled" } else { "disabled" });
+
+        if let Err(e) = Self::dnd_changed(&emitter, enabled).await {
+            tracing::warn!("failed to emit dnd_changed: {}", e);
+        }
+
+        Ok(())
+    }
+
+    /// Signal emitted whenever the DND toggle flips. Payload is the
+    /// new `enabled` value.
+    #[zbus(signal)]
+    pub async fn dnd_changed(emitter: &SignalEmitter<'_>, enabled: bool) -> zbus::Result<()>;
+
     /// Get daemon status as JSON
     async fn status(&self) -> Result<String, zbus::fdo::Error> {
         let conn = self
@@ -363,10 +409,10 @@ impl ControlDaemon {
             status: Some(NotificationStatus::Unread),
             ..Default::default()
         };
-        let unread = queries::count_notifications(&conn, &unread_filter).unwrap_or(0);
+        let unread = queries::count_notifications(&conn, &unread_filter, self.state.enc()).unwrap_or(0);
 
         let total_filter = NotificationFilter::default();
-        let total = queries::count_notifications(&conn, &total_filter).unwrap_or(0);
+        let total = queries::count_notifications(&conn, &total_filter, self.state.enc()).unwrap_or(0);
 
         let status = serde_json::json!({
             "status": "running",
@@ -375,6 +421,10 @@ impl ControlDaemon {
             "total": total,
             "db_path": self.state.db_path.display().to_string(),
             "rules_count": self.state.config.rules.len(),
+            "dnd": {
+                "enabled": self.state.is_dnd(),
+                "allow_critical": self.state.config.dnd.allow_critical,
+            },
         });
 
         Ok(status.to_string())

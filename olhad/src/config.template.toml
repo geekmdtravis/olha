@@ -19,6 +19,31 @@
 # timeout_low      = 5
 # timeout_critical = 0
 
+[dnd]
+# Do Not Disturb. Toggle the *runtime* state with `olha dnd on|off|toggle`
+# (it persists across daemon restarts). This section only configures the
+# policy applied while DND is active.
+#
+# allow_critical = true    # critical urgency still pops through; false silences everything
+
+[encryption]
+# At-rest encryption of notification content (summary, body, hints).
+#
+# When enabled, olhad reads a key from `pass` at the entry below on
+# startup, derives a 32-byte AEAD key from it, and encrypts every
+# notification's sensitive fields before writing to SQLite. The
+# daemon transparently decrypts on read, so `olha list` / the popup
+# continue to show plaintext.
+#
+# Setup (run once, before flipping `enabled = true`):
+#     olha encryption init          # generate + store DEK in `pass`
+#     olha encryption enable        # wipes plaintext rows, flips flag
+#
+# If you lose the pass entry, the encrypted rows become unreadable.
+# Back up `~/.password-store/olha/db-key.gpg` alongside the DB.
+# enabled    = false
+# pass_entry = "olha/db-key"
+
 # Used by `olha-popup` (requires a wlr-layer-shell compositor).
 # Ignored by `olhad` itself.
 [popup]

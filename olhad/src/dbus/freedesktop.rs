@@ -10,6 +10,13 @@ use crate::notification::{Action, Notification, NotificationStatus, Urgency};
 use crate::rules::RuleAction;
 use crate::DaemonState;
 
+/// Whether DND, if active, should suppress a notification with the
+/// given urgency. `allow_critical` comes from `[dnd]` config; when
+/// true, critical notifications bypass DND.
+fn dnd_suppresses(urgency: Urgency, allow_critical: bool) -> bool {
+    !(allow_critical && urgency == Urgency::Critical)
+}
+
 /// Freedesktop notification daemon (org.freedesktop.Notifications)
 #[derive(Clone)]
 pub struct NotificationsDaemon {
@@ -139,6 +146,18 @@ impl NotificationsDaemon {
         inner.mark_active(id);
         drop(inner); // release lock before DB operations
 
+        // Degraded mode: encryption is configured but no DEK is
+        // loaded. Refuse to store anything rather than silently
+        // writing plaintext the user asked to be encrypted. Return a
+        // dbus_id so the caller doesn't see a hard failure mid-flight.
+        if self.state.is_degraded() {
+            tracing::error!(
+                "refusing notification from '{}' in --allow-degraded-read mode (encryption enabled but DEK unavailable)",
+                app_name,
+            );
+            return Ok(id);
+        }
+
         // Extract fields from borrowed hints before they go out of scope
         let urgency = extract_urgency(&hints);
         let category = extract_string_hint(&hints, "category");
@@ -242,7 +261,7 @@ impl NotificationsDaemon {
 
         // Update in DB: find notification by dbus_id and mark as cleared
         match self.state.open_db() {
-            Ok(conn) => match queries::get_notification_by_dbus_id(&conn, id) {
+            Ok(conn) => match queries::get_notification_by_dbus_id(&conn, id, self.state.enc()) {
                 Ok(Some(notif)) => {
                     if let Some(row_id) = notif.row_id {
                         if let Err(e) =
@@ -334,14 +353,33 @@ impl NotificationsDaemon {
         }
     }
 
-    /// Store a notification in the database
+    /// Store a notification in the database. When encryption is
+    /// enabled at daemon startup, sensitive fields are encrypted into
+    /// the matching `_enc` BLOB columns; otherwise it's the legacy
+    /// plaintext path.
     fn store_notification(&self, notif: &Notification) -> Result<i64, crate::db::DbError> {
         let conn = self.state.open_db()?;
-        queries::insert_notification(&conn, notif)
+        queries::insert_notification(&conn, notif, self.state.enc())
     }
 
-    /// Emit a NotificationReceived signal on the org.olha.Daemon interface
+    /// Emit a NotificationReceived signal on the org.olha.Daemon interface.
+    ///
+    /// Under DND, we swallow the signal so subscribers (olha-popup,
+    /// `olha subscribe`) stay quiet, but storage has already happened
+    /// at the call site — the notification is still in `olha list`.
+    /// Critical urgency bypasses DND when `[dnd].allow_critical` is on.
     async fn emit_notification_signal(&self, notif: &Notification) {
+        if self.state.is_dnd()
+            && dnd_suppresses(notif.urgency, self.state.config.dnd.allow_critical)
+        {
+            tracing::debug!(
+                "DND active — suppressing notification_received for app={} urgency={:?}",
+                notif.app_name,
+                notif.urgency,
+            );
+            return;
+        }
+
         let json = match serde_json::to_string(notif) {
             Ok(j) => j,
             Err(e) => {
@@ -368,5 +406,24 @@ impl NotificationsDaemon {
         {
             tracing::error!("Failed to emit NotificationReceived signal: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dnd_lets_critical_through_when_allowed() {
+        assert!(!dnd_suppresses(Urgency::Critical, true));
+        assert!(dnd_suppresses(Urgency::Normal, true));
+        assert!(dnd_suppresses(Urgency::Low, true));
+    }
+
+    #[test]
+    fn dnd_silences_everything_when_allow_critical_off() {
+        assert!(dnd_suppresses(Urgency::Critical, false));
+        assert!(dnd_suppresses(Urgency::Normal, false));
+        assert!(dnd_suppresses(Urgency::Low, false));
     }
 }

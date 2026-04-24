@@ -50,6 +50,12 @@ pub struct Config {
     pub notifications: NotificationConfig,
 
     #[serde(default)]
+    pub encryption: EncryptionConfig,
+
+    #[serde(default)]
+    pub dnd: DndConfig,
+
+    #[serde(default)]
     pub rules: Vec<NotificationRule>,
 }
 
@@ -147,6 +153,61 @@ impl NotificationConfig {
     }
 }
 
+/// At-rest encryption settings. When `enabled` is true, the daemon
+/// unlocks a Data Encryption Key from `pass` at `pass_entry` on
+/// startup and encrypts `summary`, `body`, and `hints` of every
+/// notification before writing to SQLite.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptionConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default = "EncryptionConfig::default_pass_entry")]
+    pub pass_entry: String,
+}
+
+impl Default for EncryptionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            pass_entry: Self::default_pass_entry(),
+        }
+    }
+}
+
+impl EncryptionConfig {
+    fn default_pass_entry() -> String {
+        "olha/db-key".to_string()
+    }
+}
+
+/// Do Not Disturb. The `enabled` flag itself is runtime state (toggled
+/// via `olha dnd on/off` and persisted to the `meta` table), so it
+/// deliberately does *not* live here. This section is the static
+/// policy applied while DND is active.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DndConfig {
+    /// When true (default), notifications with `urgency = critical`
+    /// still pop through while DND is on. Flip to false to silence
+    /// everything.
+    #[serde(default = "DndConfig::default_allow_critical")]
+    pub allow_critical: bool,
+}
+
+impl Default for DndConfig {
+    fn default() -> Self {
+        Self {
+            allow_critical: Self::default_allow_critical(),
+        }
+    }
+}
+
+impl DndConfig {
+    fn default_allow_critical() -> bool {
+        true
+    }
+}
+
 /// Template written to `~/.config/olha/config.toml` on first run. Contains
 /// every option as a commented-out default so users discover knobs by
 /// reading the file rather than the README.
@@ -197,6 +258,8 @@ impl Default for Config {
             general: GeneralConfig::default(),
             retention: RetentionConfig::default(),
             notifications: NotificationConfig::default(),
+            encryption: EncryptionConfig::default(),
+            dnd: DndConfig::default(),
             rules: Vec::new(),
         }
     }
@@ -287,6 +350,9 @@ mod tests {
             parsed.notifications.timeout_critical,
             defaults.notifications.timeout_critical
         );
+        assert_eq!(parsed.encryption.enabled, defaults.encryption.enabled);
+        assert_eq!(parsed.encryption.pass_entry, defaults.encryption.pass_entry);
+        assert_eq!(parsed.dnd.allow_critical, defaults.dnd.allow_critical);
         assert!(parsed.rules.is_empty());
     }
 }

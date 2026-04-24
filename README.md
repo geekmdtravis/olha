@@ -13,6 +13,7 @@ Unlike traditional notification daemons that show popups and forget, **olha** st
 - **Minimal & Fast**: Written in Rust, lightweight daemon with zero dependencies on GTK/heavy UI libraries
 - **Scriptable**: JSON output, subscribe mode for real-time event streaming
 - **Notification Rules**: Auto-mute, auto-clear, or ignore notifications based on regex patterns
+- **Do Not Disturb**: Silence popups on demand; history is still recorded, and critical notifications break through by default
 - **Automatic Cleanup**: Configurable retention policies (max age, max count)
 
 ## Installation
@@ -124,6 +125,39 @@ When an application sends a notification, it can request a specific timeout (how
 These timeouts control the D-Bus `expire_timeout` value sent back to the notification source. They do **not** affect how long notifications are kept in the database — that's controlled by the `[retention]` section above.
 
 **Example**: If Firefox sends a "Download complete" notification without a timeout, olha assigns the `default_timeout` of 10 seconds. After 10 seconds, the notification is considered expired, but it remains in the database as part of your notification history until the retention policy cleans it up.
+
+### Do Not Disturb
+
+`olha dnd` toggles DND at runtime. While on, the daemon still stores
+incoming notifications in history, but the `notification_received`
+signal is not emitted — so `olha-popup` stays quiet and
+`olha subscribe` doesn't tick. Turn it off and new notifications
+resume as normal. State persists across daemon restarts.
+
+```bash
+olha dnd            # show current state
+olha dnd on         # silence popups
+olha dnd off        # resume popups
+olha dnd toggle
+olha dnd --json     # machine-readable: {"enabled":..., "allow_critical":...}
+```
+
+Critical-urgency notifications (battery warnings, system errors)
+break through DND by default. To make DND silence *everything*, set
+this in your config:
+
+```toml
+[dnd]
+allow_critical = false
+```
+
+Notes:
+
+- DND only affects the real-time signal stream. Missed notifications
+  are always recoverable via `olha list`.
+- Clients can also react to the `dnd_changed` D-Bus signal on
+  `org.olha.Daemon` if you want a status-bar indicator that flips
+  without polling.
 
 ### Notification Rules
 

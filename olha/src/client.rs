@@ -21,6 +21,8 @@ pub trait ControlDaemon {
     fn get_notification(&self, id: u64) -> zbus::Result<String>;
     fn invoke_action(&self, id: u64, action_key: &str) -> zbus::Result<()>;
     fn status(&self) -> zbus::Result<String>;
+    fn get_dnd(&self) -> zbus::Result<String>;
+    fn set_dnd(&self, enabled: bool) -> zbus::Result<()>;
 
     #[zbus(signal)]
     fn notification_received(&self, notification: &str) -> zbus::Result<()>;
@@ -273,6 +275,67 @@ pub async fn subscribe(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// What the user typed as the argument to `olha dnd`.
+#[derive(Debug, Clone, Copy)]
+pub enum DndAction {
+    Status,
+    On,
+    Off,
+    Toggle,
+}
+
+pub async fn dnd(action: DndAction, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let proxy = connect().await?;
+
+    let target: Option<bool> = match action {
+        DndAction::Status => None,
+        DndAction::On => Some(true),
+        DndAction::Off => Some(false),
+        DndAction::Toggle => {
+            let current = read_dnd_enabled(&proxy).await?;
+            Some(!current)
+        }
+    };
+
+    if let Some(enabled) = target {
+        proxy.set_dnd(enabled).await.map_err(map_call_error)?;
+    }
+
+    let raw = proxy.get_dnd().await.map_err(map_call_error)?;
+
+    if json {
+        println!("{}", raw);
+        return Ok(());
+    }
+
+    let val: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
+    let enabled = val.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let allow_critical = val
+        .get("allow_critical")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let state = if enabled { "on" } else { "off" };
+    println!("DND: {}", state);
+    if enabled {
+        if allow_critical {
+            println!("  Critical urgency notifications still break through.");
+        } else {
+            println!("  All notifications are silenced.");
+        }
+    }
+
+    Ok(())
+}
+
+async fn read_dnd_enabled(
+    proxy: &ControlDaemonProxy<'_>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let raw = proxy.get_dnd().await.map_err(map_call_error)?;
+    let val: serde_json::Value = serde_json::from_str(&raw)?;
+    Ok(val.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false))
+}
+
 pub async fn status(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let proxy = connect().await?;
 
@@ -299,6 +362,10 @@ pub async fn status(json: bool) -> Result<(), Box<dyn std::error::Error>> {
         }
         if let Some(n) = val.get("rules_count").and_then(|v| v.as_i64()) {
             println!("  Rules: {}", n);
+        }
+        if let Some(dnd) = val.get("dnd") {
+            let enabled = dnd.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+            println!("  DND: {}", if enabled { "on" } else { "off" });
         }
     } else {
         println!("{}", result);

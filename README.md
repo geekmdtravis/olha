@@ -580,6 +580,26 @@ olha status              # Show daemon status
 olha status --json       # JSON output
 ```
 
+The non-JSON output includes the current DND toggle. With `--json`,
+there's a `dnd` object: `{"enabled": bool, "allow_critical": bool}`.
+
+### Do Not Disturb
+
+```bash
+olha dnd                 # Show current state
+olha dnd on              # Silence popups
+olha dnd off             # Resume popups
+olha dnd toggle          # Flip the current state
+olha dnd --json          # {"enabled": bool, "allow_critical": bool}
+```
+
+While DND is on, the daemon still writes every incoming notification
+to the database — the `notification_received` signal is simply not
+emitted, so `olha-popup` and `olha subscribe` stay quiet. History is
+always recoverable via `olha list`. Critical-urgency notifications
+break through by default; see the [Do Not Disturb config
+section](#do-not-disturb) to silence everything instead.
+
 ## Notification Lifecycle
 
 Unlike traditional notification daemons that show a popup and then forget about it, olha stores every notification in a database and tracks its state. This means you can go back and see what you missed, search through old notifications, or script workflows around them.
@@ -825,7 +845,11 @@ click-left = olha list
 
 ## Database Schema
 
-The SQLite database stores notifications with the following fields:
+The SQLite database has two tables: `notifications` (per-notification
+rows) and `meta` (small daemon-wide state, currently just the DND
+toggle).
+
+### `notifications`
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -845,6 +869,23 @@ The SQLite database stores notifications with the following fields:
 | `created_at` | TEXT | ISO 8601 creation timestamp |
 | `updated_at` | TEXT | ISO 8601 last update timestamp |
 | `closed_reason` | INTEGER | Why it was closed (1=expired, 2=dismissed, etc.) |
+
+When `[encryption].enabled = true`, the `summary`, `body`, and `hints`
+columns are empty and the authoritative ciphertext lives in the
+`summary_enc` / `body_enc` / `hints_enc` BLOB columns, alongside an
+`enc_version` and `key_id` pinning the row to the DEK that encrypted
+it.
+
+### `meta`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `key` | TEXT | Primary key. Currently only `dnd_enabled` is used. |
+| `value` | TEXT | Opaque string value (e.g., `"true"` / `"false"`). |
+
+This table is a tiny KV store for daemon state that needs to survive
+restarts without a config-file round-trip. The DND toggle set by
+`olha dnd on/off` lives here.
 
 ## Filtering & Queries
 

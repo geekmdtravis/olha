@@ -29,20 +29,30 @@
 [encryption]
 # At-rest encryption of notification content (summary, body, hints).
 #
-# When enabled, olhad reads a key from `pass` at the entry below on
-# startup, derives a 32-byte AEAD key from it, and encrypts every
-# notification's sensitive fields before writing to SQLite. The
-# daemon transparently decrypts on read, so `olha list` / the popup
-# continue to show plaintext.
+# When enabled, olhad seals every notification under a long-lived
+# X25519 public key on write. Reads require the matching secret key,
+# which is wrapped with a DEK derived from `pass show <pass_entry>`
+# and only unwrapped into daemon memory on `olha unlock`.
+#
+# Writes work even while the daemon is locked — incoming notifications
+# are sealed with the public key and persist as ciphertext. Running
+# `olha list` (or the popup querying history) while locked shows
+# `[encrypted]` placeholders until you unlock.
 #
 # Setup (run once, before flipping `enabled = true`):
-#     olha encryption init          # generate + store DEK in `pass`
+#     olha encryption init          # generate keypair + wrap sk under pass DEK
 #     olha encryption enable        # wipes plaintext rows, flips flag
 #
-# If you lose the pass entry, the encrypted rows become unreadable.
-# Back up `~/.password-store/olha/db-key.gpg` alongside the DB.
-# enabled    = false
-# pass_entry = "olha/db-key"
+# Session flow:
+#     olha unlock                   # one pinentry prompt; 5-min idle timer starts
+#     olha lock                     # zeroizes sk immediately
+#
+# If you lose the pass entry, encrypted rows become unreadable. Back
+# up `~/.password-store/olha/db-key.gpg` alongside the DB.
+#
+# enabled        = false
+# pass_entry     = "olha/db-key"
+# auto_lock_secs = 300    # idle seconds before auto-lock; 0 disables
 
 # Used by `olha-popup` (requires a wlr-layer-shell compositor).
 # Ignored by `olhad` itself.
@@ -53,6 +63,13 @@
 # gap         = 8             # px between stacked popups
 # width       = 380
 # height      = 120
+#
+# Privacy: when true AND the daemon is locked, popups render a generic
+# "<app>" / "New notification" placeholder instead of the real content.
+# The daemon still has plaintext at Notify time (it just hasn't stored
+# it as plaintext), so this is purely a rendering choice. Override per
+# rule with `hide_content_when_locked = true|false` on `[[popup.rules]]`.
+# hide_content_when_locked = false
 
 
 # ───────────────────────── Notification rules ─────────────────────────
@@ -153,3 +170,8 @@
 # name                  = "short-timeout-for-slack"
 # app_name              = '^Slack$'
 # override_timeout_secs = 4
+#
+# [[popup.rules]]
+# name                     = "always-hide-signal-preview-when-locked"
+# app_name                 = '(?i)^signal$'
+# hide_content_when_locked = true    # overrides the global default

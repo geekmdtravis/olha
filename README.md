@@ -15,6 +15,7 @@ Unlike traditional notification daemons that show popups and forget, **olha** st
 - **Notification Rules**: Auto-mute, auto-clear, or ignore notifications based on regex patterns
 - **Do Not Disturb**: Silence popups on demand; history is still recorded, and critical notifications break through by default
 - **Automatic Cleanup**: Configurable retention policies (max age, max count)
+- **At-Rest Encryption** (optional): X25519 sealed-box so writes work even when the daemon is locked; reads of stored history need `olha unlock`. Idle auto-lock after 5 minutes by default.
 
 ## Installation
 
@@ -873,19 +874,77 @@ toggle).
 When `[encryption].enabled = true`, the `summary`, `body`, and `hints`
 columns are empty and the authoritative ciphertext lives in the
 `summary_enc` / `body_enc` / `hints_enc` BLOB columns, alongside an
-`enc_version` and `key_id` pinning the row to the DEK that encrypted
-it.
+`enc_version` (1 for the current sealed-box format; 0 for plaintext
+rows that pre-date enabling encryption) and `key_id` pinning the row
+to the X25519 public key it was sealed under.
 
 ### `meta`
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `key` | TEXT | Primary key. Currently only `dnd_enabled` is used. |
-| `value` | TEXT | Opaque string value (e.g., `"true"` / `"false"`). |
+| `key` | TEXT | Primary key. |
+| `value` | TEXT | Opaque string value. |
 
-This table is a tiny KV store for daemon state that needs to survive
-restarts without a config-file round-trip. The DND toggle set by
-`olha dnd on/off` lives here.
+Tiny KV store for daemon state that must survive restarts without a
+config-file round-trip. Known keys:
+
+| Key | Purpose |
+|-----|---------|
+| `dnd_enabled` | `"true"` / `"false"` — persisted DND toggle. |
+| `enc_public_key` | base64 32-byte X25519 pk; loaded at daemon startup to seal writes. |
+| `enc_wrapped_secret` | base64 blob holding the X25519 sk, XChaCha20-Poly1305-wrapped under the DEK from `pass show`. Unwrapped only during `olha unlock`. |
+| `enc_key_id` | hex SHA-256(pk)[..4]. Stable per keypair; surfaced in `olha encryption status`. |
+| `enc_dek_kid` | hex SHA-256(DEK)[..4]. Reporting only. |
+
+## Encryption
+
+olha's at-rest encryption uses an **X25519 sealed-box** so that writes
+work even when the daemon is locked — only reads need an unlocked
+secret.
+
+```
+                 ┌── pk (loaded from meta at startup) ──► seal every incoming notification
+ pass show ──► DEK ──► unwrap sk (only on `olha unlock`) ───► decrypt on read
+                                  │
+                                  └── zeroized on `olha lock` / after auto_lock_secs idle
+```
+
+Setup (run once):
+
+```bash
+olha encryption init       # generates X25519 keypair, seeds pass entry, wraps sk under DEK
+olha encryption enable     # wipes existing plaintext rows, flips [encryption].enabled = true
+```
+
+Session flow:
+
+```bash
+olha unlock                # one pinentry prompt if gpg-agent has no cache; idle timer starts
+# ... use olha list / show / subscribe; each successful decrypt resets the timer ...
+olha lock                  # zeroizes the in-memory sk immediately
+```
+
+While locked, incoming notifications are stored as sealed ciphertext
+(no data loss), but `olha list` shows `[encrypted]` placeholders for
+their content. `olha-popup` by default still displays the real
+content for live incoming notifications because the daemon hands the
+popup plaintext on the signal before sealing — flip
+`[popup].hide_content_when_locked = true` to gate that.
+
+Key management subcommands:
+
+| Command | Cost | Daemon must be stopped |
+|---------|------|------------------------|
+| `olha encryption init` | O(1) | no |
+| `olha encryption enable` | O(wiped plaintext rows) | no |
+| `olha encryption disable --rekey-to-plaintext` | O(rows) | **yes** |
+| `olha encryption rewrap` | O(1) — touches `meta` only; use after rotating your `pass` passphrase | no |
+| `olha encryption rotate-key` | O(rows) — new X25519 keypair, re-seal everything | **yes** |
+| `olha encryption status` | O(1) | no |
+
+The `pass` entry (default `olha/db-key`) holds the raw input the DEK
+derives from; losing it permanently bricks every encrypted row.
+Back up `~/.password-store/olha/db-key.gpg` alongside your DB.
 
 ## Filtering & Queries
 

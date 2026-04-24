@@ -1,103 +1,94 @@
-use crate::db::encryption::{EncryptionContext, FieldTag, ENC_VERSION_CURRENT};
+use crate::db::encryption::{open_field, seal_field, EncMode, FieldTag, ENC_VERSION, KEY_ID_LEN};
 use crate::db::DbResult;
 use crate::notification::{ClosedReason, Notification, NotificationStatus, Urgency};
 use chrono::Utc;
 use rusqlite::{params, Connection, Row};
 use tracing;
 
-/// Placeholder shown in place of a decrypted field when the current
-/// DEK can't decrypt it (daemon in `--allow-degraded-read` mode, or
-/// the row was encrypted under a retired key).
+/// Shown when encryption is enabled but the daemon is locked / the
+/// row was sealed under a different public key than the one currently
+/// loaded.
 const PLACEHOLDER_ENCRYPTED: &str = "[encrypted]";
-const PLACEHOLDER_KEY_UNAVAILABLE: &str = "[key unavailable]";
 
-/// Insert a new notification into the database.
+/// Insert a new notification.
 ///
-/// If `enc` is `Some`, the `summary`, `body`, and `hints` fields are
-/// encrypted into the `_enc` BLOB columns and the matching TEXT
-/// columns are stored as empty strings. Otherwise they're stored as
-/// plaintext (legacy path, `enc_version = 0`).
+/// Writes are encrypted iff `enc.is_encrypted()` — works even in
+/// `EncMode::Locked` because sealing only needs the public key.
 pub fn insert_notification(
     conn: &Connection,
     notif: &Notification,
-    enc: Option<&EncryptionContext>,
+    enc: &EncMode,
 ) -> DbResult<i64> {
     let now = Utc::now().to_rfc3339();
     let hints_json = notif.hints.to_string();
 
-    match enc {
-        Some(ctx) => {
-            let summary_enc = ctx
-                .encrypt_field(FieldTag::Summary, notif.summary.as_bytes())
-                .map_err(encryption_to_db_err)?;
-            let body_enc = ctx
-                .encrypt_field(FieldTag::Body, notif.body.as_bytes())
-                .map_err(encryption_to_db_err)?;
-            let hints_enc = ctx
-                .encrypt_field(FieldTag::Hints, hints_json.as_bytes())
-                .map_err(encryption_to_db_err)?;
+    if let Some(pk) = enc.pk() {
+        let summary_enc = seal_field(pk, FieldTag::Summary, notif.summary.as_bytes())
+            .map_err(encryption_to_db_err)?;
+        let body_enc =
+            seal_field(pk, FieldTag::Body, notif.body.as_bytes()).map_err(encryption_to_db_err)?;
+        let hints_enc =
+            seal_field(pk, FieldTag::Hints, hints_json.as_bytes()).map_err(encryption_to_db_err)?;
 
-            conn.execute(
-                "INSERT INTO notifications (
-                    dbus_id, app_name, app_icon, summary, body, urgency, category,
-                    desktop_entry, actions, hints, status, expire_timeout, created_at, updated_at,
-                    summary_enc, body_enc, hints_enc, enc_version, key_id
-                 ) VALUES (?1, ?2, ?3, '', '', ?4, ?5, ?6, ?7, '', ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-                params![
-                    notif.dbus_id,
-                    &notif.app_name,
-                    &notif.app_icon,
-                    notif.urgency.as_u32(),
-                    &notif.category,
-                    &notif.desktop_entry,
-                    serde_json::to_string(&notif.actions).unwrap_or_default(),
-                    notif.status.as_str(),
-                    notif.expire_timeout,
-                    &notif.created_at.to_rfc3339(),
-                    &now,
-                    summary_enc,
-                    body_enc,
-                    hints_enc,
-                    ENC_VERSION_CURRENT,
-                    ctx.key_id().to_vec(),
-                ],
-            )?;
-        }
-        None => {
-            conn.execute(
-                "INSERT INTO notifications (
-                    dbus_id, app_name, app_icon, summary, body, urgency, category,
-                    desktop_entry, actions, hints, status, expire_timeout, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-                params![
-                    notif.dbus_id,
-                    &notif.app_name,
-                    &notif.app_icon,
-                    &notif.summary,
-                    &notif.body,
-                    notif.urgency.as_u32(),
-                    &notif.category,
-                    &notif.desktop_entry,
-                    serde_json::to_string(&notif.actions).unwrap_or_default(),
-                    hints_json,
-                    notif.status.as_str(),
-                    notif.expire_timeout,
-                    &notif.created_at.to_rfc3339(),
-                    &now,
-                ],
-            )?;
-        }
+        let key_id: Vec<u8> = enc.key_id().map(|k| k.to_vec()).unwrap_or_default();
+
+        conn.execute(
+            "INSERT INTO notifications (
+                dbus_id, app_name, app_icon, summary, body, urgency, category,
+                desktop_entry, actions, hints, status, expire_timeout, created_at, updated_at,
+                summary_enc, body_enc, hints_enc, enc_version, key_id
+             ) VALUES (?1, ?2, ?3, '', '', ?4, ?5, ?6, ?7, '', ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            params![
+                notif.dbus_id,
+                &notif.app_name,
+                &notif.app_icon,
+                notif.urgency.as_u32(),
+                &notif.category,
+                &notif.desktop_entry,
+                serde_json::to_string(&notif.actions).unwrap_or_default(),
+                notif.status.as_str(),
+                notif.expire_timeout,
+                &notif.created_at.to_rfc3339(),
+                &now,
+                summary_enc,
+                body_enc,
+                hints_enc,
+                ENC_VERSION,
+                key_id,
+            ],
+        )?;
+    } else {
+        conn.execute(
+            "INSERT INTO notifications (
+                dbus_id, app_name, app_icon, summary, body, urgency, category,
+                desktop_entry, actions, hints, status, expire_timeout, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                notif.dbus_id,
+                &notif.app_name,
+                &notif.app_icon,
+                &notif.summary,
+                &notif.body,
+                notif.urgency.as_u32(),
+                &notif.category,
+                &notif.desktop_entry,
+                serde_json::to_string(&notif.actions).unwrap_or_default(),
+                hints_json,
+                notif.status.as_str(),
+                notif.expire_timeout,
+                &notif.created_at.to_rfc3339(),
+                &now,
+            ],
+        )?;
     }
 
     Ok(conn.last_insert_rowid())
 }
 
-/// Fetch a notification by row ID. See [`notification_from_row`] for
-/// how encryption is applied at read time.
 pub fn get_notification(
     conn: &Connection,
     row_id: i64,
-    enc: Option<&EncryptionContext>,
+    enc: &EncMode,
 ) -> DbResult<Option<Notification>> {
     let query = format!("{} WHERE id = ?1", SELECT_COLUMNS);
     let mut stmt = conn.prepare(&query)?;
@@ -111,7 +102,6 @@ pub fn get_notification(
     }
 }
 
-/// Fetch notifications with optional filtering.
 #[derive(Default, Clone)]
 pub struct NotificationFilter {
     pub app_name: Option<String>,
@@ -125,26 +115,14 @@ pub struct NotificationFilter {
     pub offset: Option<i64>,
 }
 
-/// SELECT column list used by every row-returning query, in the order
-/// expected by `notification_from_row`. Keeping this in one place means
-/// adding a column only touches two spots: the tuple builder and the
-/// row decoder.
-const SELECT_COLUMNS: &str = "SELECT id, dbus_id, app_name, app_icon, summary, body, urgency, category,
+const SELECT_COLUMNS: &str =
+    "SELECT id, dbus_id, app_name, app_icon, summary, body, urgency, category,
         desktop_entry, actions, hints, status, expire_timeout, created_at, updated_at,
         closed_reason, summary_enc, body_enc, hints_enc, enc_version, key_id
         FROM notifications";
 
 impl NotificationFilter {
-    /// Build SQL query and params for filtering.
-    ///
-    /// When `skip_search_in_sql` is true, the `search` clause is
-    /// omitted so the caller can post-filter over decrypted rows in
-    /// Rust. `limit` / `offset` are likewise held back in that case
-    /// since applying them before post-filter would under-return.
-    fn build_query(
-        &self,
-        skip_search_in_sql: bool,
-    ) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    fn build_query(&self, skip_search_in_sql: bool) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
         let mut query = format!("{} WHERE 1=1", SELECT_COLUMNS);
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
@@ -202,7 +180,6 @@ impl NotificationFilter {
         (query, params)
     }
 
-    /// Build SQL query for COUNT(*) with same filtering (non-search only).
     fn build_count_query(
         &self,
         skip_search_in_sql: bool,
@@ -255,15 +232,12 @@ impl NotificationFilter {
     }
 }
 
-/// Query notifications with filtering. When encryption is enabled and
-/// the filter has a `search` term, the SQL `LIKE` is skipped and the
-/// matching is re-run in Rust over decrypted fields.
 pub fn query_notifications(
     conn: &Connection,
     filter: &NotificationFilter,
-    enc: Option<&EncryptionContext>,
+    enc: &EncMode,
 ) -> DbResult<Vec<Notification>> {
-    let use_post_filter = enc.is_some() && filter.search.is_some();
+    let use_post_filter = enc.is_unlocked() && filter.search.is_some();
     let (query, params) = filter.build_query(use_post_filter);
 
     let mut stmt = conn.prepare(&query)?;
@@ -299,18 +273,14 @@ pub fn query_notifications(
     Ok(notifications)
 }
 
-/// Count notifications with filtering. Uses the same post-filter path
-/// as `query_notifications` when encryption + search are combined.
 pub fn count_notifications(
     conn: &Connection,
     filter: &NotificationFilter,
-    enc: Option<&EncryptionContext>,
+    enc: &EncMode,
 ) -> DbResult<i64> {
-    let use_post_filter = enc.is_some() && filter.search.is_some();
+    let use_post_filter = enc.is_unlocked() && filter.search.is_some();
 
     if use_post_filter {
-        // Re-use the full query path so search matches whatever a
-        // subsequent list() call will produce.
         let notifications = query_notifications(
             conn,
             &NotificationFilter {
@@ -338,7 +308,6 @@ pub fn count_notifications(
     Ok(count)
 }
 
-/// Update all notifications matching a given status to a new status
 pub fn update_all_status(
     conn: &Connection,
     from_statuses: &[NotificationStatus],
@@ -375,19 +344,20 @@ pub fn update_all_status(
     Ok(changed)
 }
 
-/// Delete all notifications
 pub fn delete_all(conn: &Connection) -> DbResult<usize> {
     let deleted = conn.execute("DELETE FROM notifications", params![])?;
     Ok(deleted)
 }
 
-/// Find a notification by its D-Bus ID (the most recent one)
 pub fn get_notification_by_dbus_id(
     conn: &Connection,
     dbus_id: u32,
-    enc: Option<&EncryptionContext>,
+    enc: &EncMode,
 ) -> DbResult<Option<Notification>> {
-    let query = format!("{} WHERE dbus_id = ?1 ORDER BY created_at DESC LIMIT 1", SELECT_COLUMNS);
+    let query = format!(
+        "{} WHERE dbus_id = ?1 ORDER BY created_at DESC LIMIT 1",
+        SELECT_COLUMNS
+    );
     let mut stmt = conn.prepare(&query)?;
 
     let result = stmt.query_row(params![dbus_id], |row| Ok(notification_from_row(row, enc)));
@@ -399,7 +369,6 @@ pub fn get_notification_by_dbus_id(
     }
 }
 
-/// Update notification status
 pub fn update_status(conn: &Connection, row_id: i64, status: NotificationStatus) -> DbResult<()> {
     let now = Utc::now().to_rfc3339();
 
@@ -411,7 +380,6 @@ pub fn update_status(conn: &Connection, row_id: i64, status: NotificationStatus)
     Ok(())
 }
 
-/// Update multiple notifications' status
 pub fn update_statuses(
     conn: &Connection,
     row_ids: &[i64],
@@ -448,7 +416,6 @@ pub fn update_statuses(
     Ok(())
 }
 
-/// Delete notifications by row ID
 pub fn delete_notifications(conn: &Connection, row_ids: &[i64]) -> DbResult<()> {
     if row_ids.is_empty() {
         return Ok(());
@@ -473,18 +440,15 @@ pub fn delete_notifications(conn: &Connection, row_ids: &[i64]) -> DbResult<()> 
     Ok(())
 }
 
-/// Delete old notifications based on retention policy
 pub fn cleanup_old(conn: &Connection, max_age_secs: u64, max_count: i64) -> DbResult<i64> {
     let mut deleted = 0i64;
 
-    // Delete by age
     let cutoff = Utc::now() - chrono::Duration::seconds(max_age_secs as i64);
     deleted += conn.execute(
         "DELETE FROM notifications WHERE created_at < ?",
         params![cutoff.to_rfc3339()],
     )? as i64;
 
-    // Delete by count (keep only newest)
     deleted += conn.execute(
         "DELETE FROM notifications WHERE id NOT IN (
             SELECT id FROM notifications ORDER BY created_at DESC LIMIT ?
@@ -495,16 +459,11 @@ pub fn cleanup_old(conn: &Connection, max_age_secs: u64, max_count: i64) -> DbRe
     Ok(deleted)
 }
 
-/// Helper: convert a Row to a Notification. When `enc_version > 0`,
-/// the three sensitive fields come from the `_enc` BLOBs and are
-/// decrypted in place. If decryption is impossible (daemon has no
-/// DEK, or the stored row was encrypted under a different key),
-/// placeholder strings are substituted so callers never see an error
-/// for a single unreadable row.
-fn notification_from_row(
-    row: &Row,
-    enc: Option<&EncryptionContext>,
-) -> rusqlite::Result<Notification> {
+/// Row → Notification. Per-row branching on `enc_version`:
+///   0 → plaintext TEXT columns
+///   1 → sealed-box, decrypted when `enc` is `Unlocked` and the
+///       key_id matches.
+fn notification_from_row(row: &Row, enc: &EncMode) -> rusqlite::Result<Notification> {
     let urgency_u32: u32 = row.get(6)?;
     let status_str: String = row.get(11)?;
     let closed_reason_opt: Option<u32> = row.get(15)?;
@@ -516,64 +475,33 @@ fn notification_from_row(
     let updated_at_str: String = row.get(14)?;
 
     let enc_version: i64 = row.get(19)?;
+    let row_id_preview: i64 = row.get(0)?;
 
-    let (summary, body, hints) = if enc_version == 0 {
-        let summary: String = row.get(4)?;
-        let body: String = row.get(5)?;
-        let hints_str: String = row.get(10)?;
-        let hints = serde_json::from_str(&hints_str).unwrap_or(serde_json::json!({}));
-        (summary, body, hints)
-    } else {
-        let row_id_preview: i64 = row.get(0)?;
-        let summary_enc: Option<Vec<u8>> = row.get(16)?;
-        let body_enc: Option<Vec<u8>> = row.get(17)?;
-        let hints_enc: Option<Vec<u8>> = row.get(18)?;
-        let stored_key_id: Option<Vec<u8>> = row.get(20)?;
-
-        let key_matches = enc.map_or(false, |ctx| {
-            stored_key_id.as_deref().map_or(false, |k| k == ctx.key_id())
-        });
-
-        if !key_matches {
-            // Either daemon has no DEK, or the row was encrypted under
-            // a different key (pre-rotation, or --allow-degraded-read).
-            // Serve placeholders rather than erroring the whole query.
-            let reason = if enc.is_none() {
-                PLACEHOLDER_KEY_UNAVAILABLE
-            } else {
-                tracing::warn!(
-                    "row {} encrypted under unknown key_id={:?}",
-                    row_id_preview,
-                    stored_key_id
-                );
-                PLACEHOLDER_ENCRYPTED
-            };
+    let (summary, body, hints) = match enc_version {
+        0 => {
+            let summary: String = row.get(4)?;
+            let body: String = row.get(5)?;
+            let hints_str: String = row.get(10)?;
+            let hints = serde_json::from_str(&hints_str).unwrap_or(serde_json::json!({}));
+            (summary, body, hints)
+        }
+        v if v == ENC_VERSION => decrypt_fields(row, enc, row_id_preview)?,
+        other => {
+            tracing::warn!(
+                "row {} has unknown enc_version={}; serving placeholder",
+                row_id_preview,
+                other,
+            );
             (
                 PLACEHOLDER_ENCRYPTED.to_string(),
-                reason.to_string(),
+                PLACEHOLDER_ENCRYPTED.to_string(),
                 serde_json::json!({}),
             )
-        } else {
-            let ctx = enc.expect("key_matches implied enc is Some");
-            let summary = decrypt_text(ctx, FieldTag::Summary, summary_enc.as_deref());
-            let body = decrypt_text(ctx, FieldTag::Body, body_enc.as_deref());
-            let hints = match hints_enc.as_deref() {
-                Some(blob) => match ctx.decrypt_field(FieldTag::Hints, blob) {
-                    Ok(bytes) => serde_json::from_slice(&bytes)
-                        .unwrap_or_else(|_| serde_json::json!({})),
-                    Err(e) => {
-                        tracing::warn!("hints decrypt failed for row {}: {}", row_id_preview, e);
-                        serde_json::json!({})
-                    }
-                },
-                None => serde_json::json!({}),
-            };
-            (summary, body, hints)
         }
     };
 
     Ok(Notification {
-        row_id: Some(row.get(0)?),
+        row_id: Some(row_id_preview),
         dbus_id: row.get(1)?,
         app_name: row.get(2)?,
         app_icon: row.get(3)?,
@@ -604,9 +532,79 @@ fn notification_from_row(
     })
 }
 
-fn decrypt_text(ctx: &EncryptionContext, field: FieldTag, blob: Option<&[u8]>) -> String {
+fn decrypt_fields(
+    row: &Row,
+    enc: &EncMode,
+    row_id_preview: i64,
+) -> rusqlite::Result<(String, String, serde_json::Value)> {
+    let summary_enc: Option<Vec<u8>> = row.get(16)?;
+    let body_enc: Option<Vec<u8>> = row.get(17)?;
+    let hints_enc: Option<Vec<u8>> = row.get(18)?;
+    let stored_key_id: Option<Vec<u8>> = row.get(20)?;
+
+    let (pk, key_id, sk, activity) = match enc {
+        EncMode::Unlocked {
+            pk,
+            key_id,
+            sk,
+            activity,
+        } => (pk, key_id, sk, activity),
+        _ => {
+            return Ok((
+                PLACEHOLDER_ENCRYPTED.to_string(),
+                PLACEHOLDER_ENCRYPTED.to_string(),
+                serde_json::json!({}),
+            ))
+        }
+    };
+
+    let key_matches = stored_key_id
+        .as_deref()
+        .map(|k| k.len() == KEY_ID_LEN && k == &key_id[..])
+        .unwrap_or(false);
+    if !key_matches {
+        tracing::warn!(
+            "row {} sealed under key_id={:?}; current pk key_id={:?}",
+            row_id_preview,
+            stored_key_id,
+            key_id,
+        );
+        return Ok((
+            PLACEHOLDER_ENCRYPTED.to_string(),
+            PLACEHOLDER_ENCRYPTED.to_string(),
+            serde_json::json!({}),
+        ));
+    }
+
+    let sk_bytes: &[u8; 32] = sk;
+    let summary = open_text(sk_bytes, pk, FieldTag::Summary, summary_enc.as_deref());
+    let body = open_text(sk_bytes, pk, FieldTag::Body, body_enc.as_deref());
+    let hints = match hints_enc.as_deref() {
+        Some(blob) => match open_field(sk_bytes, pk, FieldTag::Hints, blob) {
+            Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+                .unwrap_or_else(|_| serde_json::json!({})),
+            Err(e) => {
+                tracing::warn!("hints open failed for row {}: {}", row_id_preview, e);
+                serde_json::json!({})
+            }
+        },
+        None => serde_json::json!({}),
+    };
+
+    // Successful decrypt path — reset the idle auto-lock timer.
+    activity.store(unix_now(), std::sync::atomic::Ordering::Relaxed);
+
+    Ok((summary, body, hints))
+}
+
+fn open_text(
+    sk: &[u8; 32],
+    pk: &x25519_dalek::PublicKey,
+    field: FieldTag,
+    blob: Option<&[u8]>,
+) -> String {
     match blob {
-        Some(b) => match ctx.decrypt_field(field, b) {
+        Some(b) => match open_field(sk, pk, field, b) {
             Ok(bytes) => String::from_utf8(bytes).unwrap_or_else(|_| PLACEHOLDER_ENCRYPTED.into()),
             Err(_) => PLACEHOLDER_ENCRYPTED.into(),
         },
@@ -614,13 +612,18 @@ fn decrypt_text(ctx: &EncryptionContext, field: FieldTag, blob: Option<&[u8]>) -
     }
 }
 
+fn unix_now() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 fn encryption_to_db_err(e: crate::db::encryption::EncryptionError) -> crate::db::DbError {
     crate::db::DbError::Encryption(e.to_string())
 }
 
-/// Read a value from the `meta` key-value table. Returns `None` if the
-/// key is absent. Used for small daemon-level state (DND toggle, etc.)
-/// that must survive restarts but isn't per-notification data.
 pub fn get_meta(conn: &Connection, key: &str) -> DbResult<Option<String>> {
     let mut stmt = conn.prepare("SELECT value FROM meta WHERE key = ?1")?;
     match stmt.query_row(params![key], |row| row.get::<_, String>(0)) {
@@ -630,7 +633,6 @@ pub fn get_meta(conn: &Connection, key: &str) -> DbResult<Option<String>> {
     }
 }
 
-/// Upsert a value into the `meta` key-value table.
 pub fn set_meta(conn: &Connection, key: &str, value: &str) -> DbResult<()> {
     conn.execute(
         "INSERT INTO meta (key, value) VALUES (?1, ?2)
@@ -643,10 +645,12 @@ pub fn set_meta(conn: &Connection, key: &str, value: &str) -> DbResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::encryption::{EncryptionContext, DEK_LEN};
+    use crate::db::encryption::{compute_pk_key_id, EncryptionState, SkBytes, X25519_KEY_LEN};
     use crate::db::schema::init_schema;
     use crate::notification::{NotificationStatus, Urgency};
     use chrono::Utc;
+    use rand::rngs::OsRng;
+    use x25519_dalek::{PublicKey, StaticSecret};
     use zeroize::Zeroizing;
 
     fn fresh_conn() -> Connection {
@@ -655,8 +659,17 @@ mod tests {
         conn
     }
 
-    fn test_ctx() -> EncryptionContext {
-        EncryptionContext::from_dek(Zeroizing::new([0x42u8; DEK_LEN]))
+    fn fresh_keypair() -> (SkBytes, PublicKey) {
+        let sk_static = StaticSecret::random_from_rng(OsRng);
+        let pk = PublicKey::from(&sk_static);
+        let sk_bytes: [u8; X25519_KEY_LEN] = sk_static.to_bytes();
+        (Zeroizing::new(sk_bytes), pk)
+    }
+
+    fn unlocked_state(sk: SkBytes, pk: PublicKey) -> EncryptionState {
+        let state = EncryptionState::with_public_key(pk, 0);
+        state.unlock(sk);
+        state
     }
 
     fn sample_notif(dbus_id: u32, summary: &str, body: &str) -> Notification {
@@ -685,19 +698,22 @@ mod tests {
     fn plaintext_roundtrip() {
         let conn = fresh_conn();
         let notif = sample_notif(1, "hi", "plaintext body");
-        let row_id = insert_notification(&conn, &notif, None).unwrap();
-        let fetched = get_notification(&conn, row_id, None).unwrap().unwrap();
+        let mode = EncMode::Plaintext;
+        let row_id = insert_notification(&conn, &notif, &mode).unwrap();
+        let fetched = get_notification(&conn, row_id, &mode).unwrap().unwrap();
         assert_eq!(fetched.summary, "hi");
         assert_eq!(fetched.body, "plaintext body");
         assert_eq!(fetched.hints, serde_json::json!({"foo": "bar"}));
     }
 
     #[test]
-    fn encrypted_roundtrip() {
+    fn unlock_then_read_returns_plaintext() {
         let conn = fresh_conn();
-        let ctx = test_ctx();
+        let (sk, pk) = fresh_keypair();
+        let state = unlocked_state(sk, pk);
+        let mode = state.enc_mode();
         let notif = sample_notif(2, "secret", "s3cr3t body");
-        let row_id = insert_notification(&conn, &notif, Some(&ctx)).unwrap();
+        let row_id = insert_notification(&conn, &notif, &mode).unwrap();
 
         // Raw DB should show empty TEXT cols and populated BLOBs
         let (enc_version, summary_text, body_blob_len): (i64, String, i64) = conn
@@ -707,50 +723,112 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(enc_version, ENC_VERSION_CURRENT);
+        assert_eq!(enc_version, ENC_VERSION);
         assert_eq!(summary_text, "");
         assert!(body_blob_len > 0);
 
-        let fetched = get_notification(&conn, row_id, Some(&ctx)).unwrap().unwrap();
+        let fetched = get_notification(&conn, row_id, &mode).unwrap().unwrap();
         assert_eq!(fetched.summary, "secret");
         assert_eq!(fetched.body, "s3cr3t body");
         assert_eq!(fetched.hints, serde_json::json!({"foo": "bar"}));
     }
 
     #[test]
-    fn read_without_key_returns_placeholder() {
+    fn write_while_locked_produces_encrypted_row() {
         let conn = fresh_conn();
-        let ctx = test_ctx();
-        let notif = sample_notif(3, "hidden", "hidden body");
-        let row_id = insert_notification(&conn, &notif, Some(&ctx)).unwrap();
+        let (_sk, pk) = fresh_keypair();
+        let state = EncryptionState::with_public_key(pk, 0);
+        let mode = state.enc_mode(); // Locked
+        assert!(matches!(mode, EncMode::Locked { .. }));
 
-        let fetched = get_notification(&conn, row_id, None).unwrap().unwrap();
-        assert_eq!(fetched.summary, PLACEHOLDER_ENCRYPTED);
-        assert_eq!(fetched.body, PLACEHOLDER_KEY_UNAVAILABLE);
+        let notif = sample_notif(3, "hidden", "hidden body");
+        let row_id = insert_notification(&conn, &notif, &mode).unwrap();
+
+        let (enc_version, summary_text): (i64, String) = conn
+            .query_row(
+                "SELECT enc_version, summary FROM notifications WHERE id=?",
+                [row_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(enc_version, ENC_VERSION);
+        assert_eq!(
+            summary_text, "",
+            "summary TEXT column must be empty for encrypted rows"
+        );
     }
 
     #[test]
-    fn read_with_wrong_key_returns_placeholder() {
+    fn read_while_locked_returns_placeholder() {
         let conn = fresh_conn();
-        let ctx1 = EncryptionContext::from_dek(Zeroizing::new([0x01u8; DEK_LEN]));
-        let ctx2 = EncryptionContext::from_dek(Zeroizing::new([0x02u8; DEK_LEN]));
+        let (sk, pk) = fresh_keypair();
+        let unlocked = unlocked_state(sk, pk);
         let notif = sample_notif(4, "hidden", "hidden body");
-        let row_id = insert_notification(&conn, &notif, Some(&ctx1)).unwrap();
+        let row_id = insert_notification(&conn, &notif, &unlocked.enc_mode()).unwrap();
 
-        let fetched = get_notification(&conn, row_id, Some(&ctx2)).unwrap().unwrap();
+        let locked_state = EncryptionState::with_public_key(pk, 0);
+        let locked_mode = locked_state.enc_mode();
+        let fetched = get_notification(&conn, row_id, &locked_mode)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched.summary, PLACEHOLDER_ENCRYPTED);
+        assert_eq!(fetched.body, PLACEHOLDER_ENCRYPTED);
+    }
+
+    #[test]
+    fn lock_then_read_returns_placeholder() {
+        let conn = fresh_conn();
+        let (sk, pk) = fresh_keypair();
+        let state = unlocked_state(sk, pk);
+        let notif = sample_notif(5, "hidden", "body");
+        let row_id = insert_notification(&conn, &notif, &state.enc_mode()).unwrap();
+        // Verify baseline
+        assert_eq!(
+            get_notification(&conn, row_id, &state.enc_mode())
+                .unwrap()
+                .unwrap()
+                .summary,
+            "hidden"
+        );
+        assert!(state.lock());
+        let fetched = get_notification(&conn, row_id, &state.enc_mode())
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched.summary, PLACEHOLDER_ENCRYPTED);
+    }
+
+    #[test]
+    fn read_with_wrong_pk_returns_placeholder() {
+        let conn = fresh_conn();
+        let (sk1, pk1) = fresh_keypair();
+        let (_, pk2) = fresh_keypair();
+
+        // Insert under pk1
+        let state1 = unlocked_state(sk1, pk1);
+        let notif = sample_notif(6, "hidden", "hidden body");
+        let row_id = insert_notification(&conn, &notif, &state1.enc_mode()).unwrap();
+
+        // Read with a state keyed on pk2 — key_id mismatches, placeholder served.
+        let (sk2, _) = fresh_keypair();
+        let state2 = unlocked_state(sk2, pk2);
+        let fetched = get_notification(&conn, row_id, &state2.enc_mode())
+            .unwrap()
+            .unwrap();
         assert_eq!(fetched.summary, PLACEHOLDER_ENCRYPTED);
     }
 
     #[test]
     fn mixed_rows_coexist() {
         let conn = fresh_conn();
-        let ctx = test_ctx();
+        let (sk, pk) = fresh_keypair();
+        let state = unlocked_state(sk, pk);
         let plain = sample_notif(10, "plain-one", "p-body");
         let enc = sample_notif(11, "enc-one", "e-body");
-        insert_notification(&conn, &plain, None).unwrap();
-        insert_notification(&conn, &enc, Some(&ctx)).unwrap();
+        insert_notification(&conn, &plain, &EncMode::Plaintext).unwrap();
+        insert_notification(&conn, &enc, &state.enc_mode()).unwrap();
 
-        let all = query_notifications(&conn, &NotificationFilter::default(), Some(&ctx)).unwrap();
+        let all =
+            query_notifications(&conn, &NotificationFilter::default(), &state.enc_mode()).unwrap();
         assert_eq!(all.len(), 2);
         let bodies: Vec<String> = all.iter().map(|n| n.body.clone()).collect();
         assert!(bodies.contains(&"p-body".to_string()));
@@ -758,31 +836,51 @@ mod tests {
     }
 
     #[test]
-    fn search_post_filters_encrypted_rows() {
+    fn search_post_filters_encrypted_rows_when_unlocked() {
         let conn = fresh_conn();
-        let ctx = test_ctx();
-        insert_notification(&conn, &sample_notif(20, "alpha meeting", "x"), Some(&ctx)).unwrap();
-        insert_notification(&conn, &sample_notif(21, "beta call", "y"), Some(&ctx)).unwrap();
-        insert_notification(&conn, &sample_notif(22, "meeting notes", "ok"), Some(&ctx)).unwrap();
+        let (sk, pk) = fresh_keypair();
+        let state = unlocked_state(sk, pk);
+        insert_notification(
+            &conn,
+            &sample_notif(20, "alpha meeting", "x"),
+            &state.enc_mode(),
+        )
+        .unwrap();
+        insert_notification(
+            &conn,
+            &sample_notif(21, "beta call", "y"),
+            &state.enc_mode(),
+        )
+        .unwrap();
+        insert_notification(
+            &conn,
+            &sample_notif(22, "meeting notes", "ok"),
+            &state.enc_mode(),
+        )
+        .unwrap();
 
         let filter = NotificationFilter {
             search: Some("meeting".into()),
             ..Default::default()
         };
-        let hits = query_notifications(&conn, &filter, Some(&ctx)).unwrap();
+        let hits = query_notifications(&conn, &filter, &state.enc_mode()).unwrap();
         assert_eq!(hits.len(), 2);
-        assert_eq!(count_notifications(&conn, &filter, Some(&ctx)).unwrap(), 2);
+        assert_eq!(
+            count_notifications(&conn, &filter, &state.enc_mode()).unwrap(),
+            2
+        );
     }
 
     #[test]
     fn post_filter_respects_limit_and_offset() {
         let conn = fresh_conn();
-        let ctx = test_ctx();
+        let (sk, pk) = fresh_keypair();
+        let state = unlocked_state(sk, pk);
         for i in 0..5 {
             insert_notification(
                 &conn,
                 &sample_notif(100 + i, &format!("match {}", i), "body"),
-                Some(&ctx),
+                &state.enc_mode(),
             )
             .unwrap();
         }
@@ -793,7 +891,7 @@ mod tests {
             offset: Some(1),
             ..Default::default()
         };
-        let hits = query_notifications(&conn, &filter, Some(&ctx)).unwrap();
+        let hits = query_notifications(&conn, &filter, &state.enc_mode()).unwrap();
         assert_eq!(hits.len(), 2);
     }
 
@@ -803,40 +901,54 @@ mod tests {
         assert_eq!(get_meta(&conn, "dnd_enabled").unwrap(), None);
 
         set_meta(&conn, "dnd_enabled", "true").unwrap();
-        assert_eq!(get_meta(&conn, "dnd_enabled").unwrap().as_deref(), Some("true"));
+        assert_eq!(
+            get_meta(&conn, "dnd_enabled").unwrap().as_deref(),
+            Some("true")
+        );
 
-        // Upsert updates in place instead of duplicating rows.
         set_meta(&conn, "dnd_enabled", "false").unwrap();
-        assert_eq!(get_meta(&conn, "dnd_enabled").unwrap().as_deref(), Some("false"));
+        assert_eq!(
+            get_meta(&conn, "dnd_enabled").unwrap().as_deref(),
+            Some("false")
+        );
 
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM meta WHERE key='dnd_enabled'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM meta WHERE key='dnd_enabled'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(n, 1);
     }
 
     #[test]
-    fn enc_version_counts_via_sql() {
+    fn successful_decrypt_bumps_activity() {
         let conn = fresh_conn();
-        let ctx = test_ctx();
-        insert_notification(&conn, &sample_notif(30, "p", "p"), None).unwrap();
-        insert_notification(&conn, &sample_notif(31, "e", "e"), Some(&ctx)).unwrap();
-        insert_notification(&conn, &sample_notif(32, "e2", "e2"), Some(&ctx)).unwrap();
-        let plain: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM notifications WHERE enc_version = 0",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        let enc: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM notifications WHERE enc_version > 0",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(plain, 1);
-        assert_eq!(enc, 2);
+        let (sk, pk) = fresh_keypair();
+        let state = unlocked_state(sk, pk);
+        let notif = sample_notif(200, "x", "y");
+        let row_id = insert_notification(&conn, &notif, &state.enc_mode()).unwrap();
+
+        // Reset activity to a known-old value, decrypt, expect fresh value.
+        state
+            .last_activity
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        let _ = get_notification(&conn, row_id, &state.enc_mode()).unwrap();
+        let after = state
+            .last_activity
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            after > 0,
+            "successful decrypt should have bumped last_activity"
+        );
+    }
+
+    #[test]
+    fn pk_key_id_is_stable() {
+        let (_, pk) = fresh_keypair();
+        let kid1 = compute_pk_key_id(&pk);
+        let kid2 = compute_pk_key_id(&pk);
+        assert_eq!(kid1, kid2);
     }
 }

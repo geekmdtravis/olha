@@ -71,6 +71,11 @@ pub struct PopupConfig {
     pub width: u32,
     #[serde(default = "default_height")]
     pub height: u32,
+    /// When true AND the daemon reports `is_unlocked = false`,
+    /// popups render a generic placeholder instead of the actual
+    /// summary/body. Default false — always show content.
+    #[serde(default)]
+    pub hide_content_when_locked: bool,
     #[serde(default)]
     pub rules: Vec<PopupRule>,
 }
@@ -99,6 +104,11 @@ pub struct PopupRule {
     /// Force an expiry in seconds regardless of per-urgency defaults (0 =
     /// never expire).
     pub override_timeout_secs: Option<u32>,
+    /// Per-rule override of `[popup].hide_content_when_locked`. `Some(true)`
+    /// forces hiding even when the global is off; `Some(false)` forces
+    /// showing even when the global is on; `None` (omitted) defers to global.
+    #[serde(default)]
+    pub hide_content_when_locked: Option<bool>,
 }
 
 fn default_position() -> Position {
@@ -129,6 +139,7 @@ impl Default for PopupConfig {
             gap: default_gap(),
             width: default_width(),
             height: default_height(),
+            hide_content_when_locked: false,
             rules: Vec::new(),
         }
     }

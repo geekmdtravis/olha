@@ -58,6 +58,7 @@ enum Message {
     Dismiss(iced::window::Id),
     ActionResult(Result<(), String>),
     WindowClosed(iced::window::Id),
+    DaemonUnlockedChanged(bool),
 }
 
 struct App {
@@ -68,6 +69,13 @@ struct App {
     /// opposite edge.
     popups: IndexMap<iced::window::Id, PopupState>,
     pending_close: Option<iced::window::Id>,
+    /// Daemon-reported unlock state. `true` means the X25519 sk is
+    /// loaded; `false` means locked or encryption disabled. Tracked
+    /// only for the `hide_content_when_locked` privacy toggle — the
+    /// popup always gets plaintext on the signal. Optimistically
+    /// `true` at startup so we err on the side of showing content
+    /// until the daemon tells us otherwise.
+    daemon_unlocked: bool,
 }
 
 impl App {
@@ -78,6 +86,7 @@ impl App {
             rules,
             popups: IndexMap::new(),
             pending_close: None,
+            daemon_unlocked: true,
         }
     }
 
@@ -176,6 +185,11 @@ impl App {
                     Task::none()
                 }
             }
+            Message::DaemonUnlockedChanged(unlocked) => {
+                tracing::debug!("daemon unlocked changed: {}", unlocked);
+                self.daemon_unlocked = unlocked;
+                Task::none()
+            }
             _ => Task::none(),
         }
     }
@@ -198,12 +212,23 @@ impl App {
         let timeout = self.timeout_for(urgency, decision.override_timeout_secs);
         let expires_at = timeout.map(|d| Instant::now() + d);
 
+        let hide_now = decision
+            .hide_content_when_locked
+            .unwrap_or(self.config.popup.hide_content_when_locked)
+            && !self.daemon_unlocked;
+
+        let (display_summary, display_body) = if hide_now {
+            (String::new(), "New notification".to_string())
+        } else {
+            (notif.summary, notif.body)
+        };
+
         let state = PopupState {
             row_id: notif.row_id,
             urgency,
             app_name: notif.app_name,
-            summary: notif.summary,
-            body: notif.body,
+            summary: display_summary,
+            body: display_body,
             actions: notif.actions,
             expires_at,
         };
@@ -329,9 +354,10 @@ impl App {
 
     fn subscription(&self) -> Subscription<Message> {
         let signals = Subscription::run(signal_stream);
+        let locked = Subscription::run(locked_stream);
         let tick = iced::time::every(Duration::from_millis(250)).map(|_| Message::Tick);
         let close_events = iced::window::close_events().map(Message::WindowClosed);
-        Subscription::batch([signals, tick, close_events])
+        Subscription::batch([signals, locked, tick, close_events])
     }
 }
 
@@ -366,6 +392,47 @@ fn signal_stream() -> impl iced::futures::Stream<Item = Message> {
                     );
                     let _ = sender.send(Message::Incoming(Box::new(notif))).await;
                 }
+            }
+        }
+        futures_util::future::pending::<()>().await;
+        unreachable!()
+    })
+}
+
+/// Track the daemon's unlock state so the privacy toggle can decide
+/// whether to hide content in popups. Reads once at startup, then
+/// listens for `locked_changed` signals.
+fn locked_stream() -> impl iced::futures::Stream<Item = Message> {
+    use iced::futures::channel::mpsc;
+    iced::stream::channel(4, |mut sender: mpsc::Sender<Message>| async move {
+        use futures_util::{SinkExt, StreamExt};
+        let proxy = match connect().await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("locked_stream: failed to connect to olhad: {e}");
+                futures_util::future::pending::<()>().await;
+                unreachable!()
+            }
+        };
+        match proxy.is_unlocked().await {
+            Ok(b) => {
+                let _ = sender.send(Message::DaemonUnlockedChanged(b)).await;
+            }
+            Err(e) => tracing::debug!("is_unlocked probe failed at startup: {e}"),
+        }
+        let mut stream = match proxy.receive_locked_changed().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("locked_stream: failed to subscribe: {e}");
+                futures_util::future::pending::<()>().await;
+                unreachable!()
+            }
+        };
+        while let Some(sig) = stream.next().await {
+            if let Ok(args) = sig.args() {
+                let _ = sender
+                    .send(Message::DaemonUnlockedChanged(*args.unlocked()))
+                    .await;
             }
         }
         futures_util::future::pending::<()>().await;

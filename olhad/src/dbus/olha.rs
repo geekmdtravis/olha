@@ -32,8 +32,9 @@ impl ControlDaemon {
             .open_db()
             .map_err(|e| zbus::fdo::Error::Failed(format!("Database error: {}", e)))?;
 
-        let notifications = queries::query_notifications(&conn, &notif_filter, self.state.enc())
-            .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?;
+        let notifications =
+            queries::query_notifications(&conn, &notif_filter, &self.state.enc_mode())
+                .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?;
 
         let json = serde_json::to_string(&notifications)
             .map_err(|e| zbus::fdo::Error::Failed(format!("Serialization error: {}", e)))?;
@@ -53,10 +54,10 @@ impl ControlDaemon {
 
         let mut unread_filter = base_filter.clone();
         unread_filter.status = Some(NotificationStatus::Unread);
-        let unread = queries::count_notifications(&conn, &unread_filter, self.state.enc())
+        let unread = queries::count_notifications(&conn, &unread_filter, &self.state.enc_mode())
             .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?;
 
-        let total = queries::count_notifications(&conn, &base_filter, self.state.enc())
+        let total = queries::count_notifications(&conn, &base_filter, &self.state.enc_mode())
             .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?;
 
         let result = serde_json::json!({
@@ -166,7 +167,7 @@ impl ControlDaemon {
             .open_db()
             .map_err(|e| zbus::fdo::Error::Failed(format!("Database error: {}", e)))?;
 
-        let notif = queries::get_notification(&conn, id as i64, self.state.enc())
+        let notif = queries::get_notification(&conn, id as i64, &self.state.enc_mode())
             .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?;
 
         let json = serde_json::to_string(&notif)
@@ -189,7 +190,7 @@ impl ControlDaemon {
             .open_db()
             .map_err(|e| zbus::fdo::Error::Failed(format!("Database error: {}", e)))?;
 
-        let notif = queries::get_notification(&conn, id as i64, self.state.enc())
+        let notif = queries::get_notification(&conn, id as i64, &self.state.enc_mode())
             .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?
             .ok_or_else(|| {
                 tracing::debug!("InvokeAction: notification row_id={} not found", id);
@@ -301,7 +302,7 @@ impl ControlDaemon {
             .open_db()
             .map_err(|e| zbus::fdo::Error::Failed(format!("Database error: {}", e)))?;
 
-        let notif = queries::get_notification(&conn, id as i64, self.state.enc())
+        let notif = queries::get_notification(&conn, id as i64, &self.state.enc_mode())
             .map_err(|e| zbus::fdo::Error::Failed(format!("Query error: {}", e)))?
             .ok_or_else(|| {
                 tracing::debug!("Dismiss: notification row_id={} not found", id);
@@ -398,6 +399,104 @@ impl ControlDaemon {
     #[zbus(signal)]
     pub async fn dnd_changed(emitter: &SignalEmitter<'_>, enabled: bool) -> zbus::Result<()>;
 
+    /// Return whether the daemon currently holds the X25519 secret
+    /// key. `false` when encryption is disabled, when nobody has run
+    /// `olha unlock`, or after `Lock` / idle auto-lock.
+    async fn is_unlocked(&self) -> Result<bool, zbus::fdo::Error> {
+        Ok(self.state.encryption.is_unlocked())
+    }
+
+    /// Derive the X25519 secret via `pass show` + DEK unwrap, and
+    /// hold it in memory until `Lock` / auto-lock. Idempotent — calls
+    /// made while already unlocked just bump the idle timer.
+    async fn unlock(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> Result<(), zbus::fdo::Error> {
+        use crate::db::encryption::{derive_dek, run_pass_show, unwrap_sk};
+        use crate::META_ENC_WRAPPED_SECRET;
+        use base64::Engine;
+
+        if !self.state.encryption.is_enabled() {
+            return Err(zbus::fdo::Error::NotSupported(
+                "encryption is disabled in config.toml".into(),
+            ));
+        }
+        if self.state.encryption.is_unlocked() {
+            // Idempotent — still nudge the idle clock.
+            self.state.encryption.record_decrypt_activity();
+            return Ok(());
+        }
+
+        let ikm = run_pass_show(&self.state.config.encryption.pass_entry).map_err(|e| {
+            tracing::warn!("Unlock: pass show failed: {e}");
+            zbus::fdo::Error::AuthFailed(format!("pass show failed: {e}"))
+        })?;
+        if ikm.is_empty() {
+            return Err(zbus::fdo::Error::AuthFailed("pass entry is empty".into()));
+        }
+        let dek = derive_dek(&ikm);
+
+        let conn = self
+            .state
+            .open_db()
+            .map_err(|e| zbus::fdo::Error::Failed(format!("db open: {e}")))?;
+        let wrapped_b64 = match crate::db::queries::get_meta(&conn, META_ENC_WRAPPED_SECRET)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("meta read: {e}")))?
+        {
+            Some(v) => v,
+            None => {
+                return Err(zbus::fdo::Error::Failed(
+                    "no encryption material on disk — run `olha encryption init`".into(),
+                ));
+            }
+        };
+        let wrapped = base64::engine::general_purpose::STANDARD
+            .decode(wrapped_b64.trim())
+            .map_err(|e| {
+                zbus::fdo::Error::Failed(format!(
+                    "meta.{}: bad base64: {e}",
+                    META_ENC_WRAPPED_SECRET
+                ))
+            })?;
+
+        let sk = unwrap_sk(&dek, &wrapped).map_err(|e| {
+            tracing::warn!("Unlock: wrapped-sk decrypt failed: {e}");
+            zbus::fdo::Error::AuthFailed(
+                "wrapped secret could not be decrypted — wrong pass entry?".into(),
+            )
+        })?;
+        // DEK dropped here — we only need sk going forward.
+        drop(dek);
+
+        self.state.encryption.unlock(sk);
+        tracing::info!("encryption unlocked");
+        if let Err(e) = Self::locked_changed(&emitter, true).await {
+            tracing::warn!("failed to emit locked_changed: {e}");
+        }
+        Ok(())
+    }
+
+    /// Zeroize the in-memory X25519 secret. Idempotent.
+    async fn lock(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> Result<(), zbus::fdo::Error> {
+        let was_unlocked = self.state.encryption.lock();
+        if was_unlocked {
+            tracing::info!("encryption locked");
+            if let Err(e) = Self::locked_changed(&emitter, false).await {
+                tracing::warn!("failed to emit locked_changed: {e}");
+            }
+        }
+        Ok(())
+    }
+
+    /// Signal emitted whenever the lock state flips. Payload is the
+    /// new `unlocked` value (true means secret key is in memory).
+    #[zbus(signal)]
+    pub async fn locked_changed(emitter: &SignalEmitter<'_>, unlocked: bool) -> zbus::Result<()>;
+
     /// Get daemon status as JSON
     async fn status(&self) -> Result<String, zbus::fdo::Error> {
         let conn = self
@@ -409,10 +508,28 @@ impl ControlDaemon {
             status: Some(NotificationStatus::Unread),
             ..Default::default()
         };
-        let unread = queries::count_notifications(&conn, &unread_filter, self.state.enc()).unwrap_or(0);
+        let unread = queries::count_notifications(&conn, &unread_filter, &self.state.enc_mode())
+            .unwrap_or(0);
 
         let total_filter = NotificationFilter::default();
-        let total = queries::count_notifications(&conn, &total_filter, self.state.enc()).unwrap_or(0);
+        let total =
+            queries::count_notifications(&conn, &total_filter, &self.state.enc_mode()).unwrap_or(0);
+
+        let encryption_payload = if self.state.encryption.is_enabled() {
+            let kid = self.state.encryption.key_id;
+            serde_json::json!({
+                "enabled": true,
+                "unlocked": self.state.encryption.is_unlocked(),
+                "key_id": format!("{:02x}{:02x}{:02x}{:02x}", kid[0], kid[1], kid[2], kid[3]),
+                "idle_until_lock_secs": self.state.encryption.idle_until_lock_secs(),
+                "auto_lock_secs": self.state.encryption.auto_lock_secs(),
+            })
+        } else {
+            serde_json::json!({
+                "enabled": false,
+                "unlocked": false,
+            })
+        };
 
         let status = serde_json::json!({
             "status": "running",
@@ -425,6 +542,7 @@ impl ControlDaemon {
                 "enabled": self.state.is_dnd(),
                 "allow_critical": self.state.config.dnd.allow_critical,
             },
+            "encryption": encryption_payload,
         });
 
         Ok(status.to_string())

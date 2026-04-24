@@ -47,8 +47,7 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         ",
     )?;
 
-    let current_version: i64 =
-        conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let current_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
     if current_version < 2 {
         migrate_to_v2(conn)?;

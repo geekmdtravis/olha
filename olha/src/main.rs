@@ -170,6 +170,17 @@ enum Commands {
         json: bool,
     },
 
+    /// Unlock the daemon: derive the DEK via `pass show` and load
+    /// the X25519 secret into daemon memory. Triggers a pinentry
+    /// prompt unless gpg-agent has cached the passphrase. Subject
+    /// to the idle auto-lock timer.
+    Unlock,
+
+    /// Zero the in-memory X25519 secret. Writes keep working (public
+    /// key is always loaded); reads of encrypted rows return
+    /// placeholders until the next unlock.
+    Lock,
+
     /// Install shell tab completions
     InstallCompletion {
         /// Shell to generate completions for
@@ -207,16 +218,23 @@ impl From<DndActionArg> for client::DndAction {
 
 #[derive(Subcommand)]
 enum EncryptionCmd {
-    /// Generate a 32-byte data encryption key and stash it in `pass`
+    /// Generate an X25519 keypair and seed a DEK in `pass`. Writes
+    /// the wrapped secret + public key to the DB `meta` table so the
+    /// daemon can seal writes even while locked.
     Init {
-        /// Pass entry path (default: olha/db-key)
         #[arg(long, default_value = "olha/db-key")]
         pass_entry: String,
 
-        /// Overwrite an existing pass entry (any rows encrypted under
-        /// the old key become permanently unreadable).
+        /// Overwrite an existing keypair/pass entry. Rows sealed
+        /// under the old key become permanently unreadable.
         #[arg(long)]
         force: bool,
+
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        config: Option<PathBuf>,
+
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        db: Option<PathBuf>,
     },
 
     /// Verify the DEK unlocks, wipe existing plaintext rows, and flip
@@ -225,20 +243,40 @@ enum EncryptionCmd {
         #[arg(long, default_value = "olha/db-key")]
         pass_entry: String,
 
-        /// Custom config path (default: XDG config location)
         #[arg(long, value_hint = ValueHint::FilePath)]
         config: Option<PathBuf>,
 
-        /// Custom DB path (default: read from config)
         #[arg(long, value_hint = ValueHint::FilePath)]
         db: Option<PathBuf>,
 
-        /// Skip the "delete N rows?" confirmation prompt.
         #[arg(long, short = 'y')]
         yes: bool,
     },
 
-    /// Report config state, DEK availability, and row counts.
+    /// Disable encryption in config.toml. Refuses unless all
+    /// encrypted rows are explicitly downgraded with
+    /// `--rekey-to-plaintext`.
+    Disable {
+        #[arg(long, default_value = "olha/db-key")]
+        pass_entry: String,
+
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        config: Option<PathBuf>,
+
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        db: Option<PathBuf>,
+
+        #[arg(long, short = 'y')]
+        yes: bool,
+
+        /// Decrypt every encrypted row back to plaintext TEXT
+        /// columns. Intentional downgrade — required when rows
+        /// exist.
+        #[arg(long)]
+        rekey_to_plaintext: bool,
+    },
+
+    /// Report config, pass availability, keypair, and row counts.
     Status {
         #[arg(long, default_value = "")]
         pass_entry: String,
@@ -250,9 +288,30 @@ enum EncryptionCmd {
         db: Option<PathBuf>,
     },
 
-    /// Generate a new DEK and re-encrypt every row under it. Stop
-    /// `olhad` first — concurrent writes will corrupt the rotation.
-    Rotate {
+    /// Re-wrap the X25519 secret under a new DEK. Fast — touches
+    /// only the `meta` table. Rows stay sealed under the same pk,
+    /// no row-level re-encryption.
+    Rewrap {
+        /// Current pass entry. Defaults to the one in config.
+        #[arg(long, default_value = "olha/db-key")]
+        old_pass_entry: String,
+
+        /// New pass entry. Same as `old_pass_entry` means "regenerate
+        /// the existing entry's contents in place". Different means
+        /// "switch to a new entry name" (also flips the config).
+        #[arg(long, default_value = "olha/db-key")]
+        new_pass_entry: String,
+
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        config: Option<PathBuf>,
+
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        db: Option<PathBuf>,
+    },
+
+    /// Generate a new X25519 keypair and re-seal every row under it.
+    /// Slow (O(rows)). Stop `olhad` first.
+    RotateKey {
         #[arg(long, default_value = "olha/db-key")]
         pass_entry: String,
 
@@ -261,6 +320,9 @@ enum EncryptionCmd {
 
         #[arg(long, value_hint = ValueHint::FilePath)]
         db: Option<PathBuf>,
+
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
 }
 
@@ -367,9 +429,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             cmd_install_completion(shell, output)?;
         }
 
+        Commands::Unlock => client::unlock().await?,
+        Commands::Lock => client::lock().await?,
+
         Commands::Encryption(sub) => match sub {
-            EncryptionCmd::Init { pass_entry, force } => {
-                encryption::init(&pass_entry, force)?;
+            EncryptionCmd::Init {
+                pass_entry,
+                force,
+                config,
+                db,
+            } => {
+                encryption::init(&pass_entry, force, config.as_deref(), db.as_deref())?;
             }
             EncryptionCmd::Enable {
                 pass_entry,
@@ -379,19 +449,49 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             } => {
                 encryption::enable(&pass_entry, config.as_deref(), db.as_deref(), yes)?;
             }
+            EncryptionCmd::Disable {
+                pass_entry,
+                config,
+                db,
+                yes,
+                rekey_to_plaintext,
+            } => {
+                encryption::disable(
+                    &pass_entry,
+                    config.as_deref(),
+                    db.as_deref(),
+                    yes,
+                    rekey_to_plaintext,
+                )
+                .await?;
+            }
             EncryptionCmd::Status {
                 pass_entry,
                 config,
                 db,
             } => {
-                encryption::status(&pass_entry, config.as_deref(), db.as_deref())?;
+                encryption::status(&pass_entry, config.as_deref(), db.as_deref()).await?;
             }
-            EncryptionCmd::Rotate {
-                pass_entry,
+            EncryptionCmd::Rewrap {
+                old_pass_entry,
+                new_pass_entry,
                 config,
                 db,
             } => {
-                encryption::rotate(&pass_entry, config.as_deref(), db.as_deref())?;
+                encryption::rewrap(
+                    &old_pass_entry,
+                    &new_pass_entry,
+                    config.as_deref(),
+                    db.as_deref(),
+                )?;
+            }
+            EncryptionCmd::RotateKey {
+                pass_entry,
+                config,
+                db,
+                yes,
+            } => {
+                encryption::rotate_key(&pass_entry, config.as_deref(), db.as_deref(), yes).await?;
             }
         },
     }

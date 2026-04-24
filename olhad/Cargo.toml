@@ -30,3 +30,5 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 rand = "0.8"
 base64 = "0.22"
 sha2 = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+parking_lot = "0.12"

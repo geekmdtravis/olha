@@ -12,8 +12,13 @@ pub trait ControlDaemon {
 
     fn dismiss(&self, id: u64) -> zbus::Result<()>;
 
+    fn is_unlocked(&self) -> zbus::Result<bool>;
+
     #[zbus(signal)]
     fn notification_received(&self, notification: &str) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn locked_changed(&self, unlocked: bool) -> zbus::Result<()>;
 }
 
 pub async fn connect() -> zbus::Result<ControlDaemonProxy<'static>> {

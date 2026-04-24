@@ -154,9 +154,10 @@ impl NotificationConfig {
 }
 
 /// At-rest encryption settings. When `enabled` is true, the daemon
-/// unlocks a Data Encryption Key from `pass` at `pass_entry` on
-/// startup and encrypts `summary`, `body`, and `hints` of every
-/// notification before writing to SQLite.
+/// loads the long-lived X25519 public key from the DB's `meta` table
+/// and seals `summary`, `body`, and `hints` of every notification
+/// before writing. The matching secret key lives in memory only
+/// between `olha unlock` and `olha lock` / auto-lock.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptionConfig {
     #[serde(default)]
@@ -164,6 +165,12 @@ pub struct EncryptionConfig {
 
     #[serde(default = "EncryptionConfig::default_pass_entry")]
     pub pass_entry: String,
+
+    /// Idle timeout in seconds before the daemon auto-locks and
+    /// zeroes the X25519 secret key. 0 disables auto-lock. Default
+    /// 300 (5 minutes).
+    #[serde(default = "EncryptionConfig::default_auto_lock_secs")]
+    pub auto_lock_secs: u64,
 }
 
 impl Default for EncryptionConfig {
@@ -171,6 +178,7 @@ impl Default for EncryptionConfig {
         Self {
             enabled: false,
             pass_entry: Self::default_pass_entry(),
+            auto_lock_secs: Self::default_auto_lock_secs(),
         }
     }
 }
@@ -178,6 +186,10 @@ impl Default for EncryptionConfig {
 impl EncryptionConfig {
     fn default_pass_entry() -> String {
         "olha/db-key".to_string()
+    }
+
+    fn default_auto_lock_secs() -> u64 {
+        300
     }
 }
 
@@ -352,6 +364,10 @@ mod tests {
         );
         assert_eq!(parsed.encryption.enabled, defaults.encryption.enabled);
         assert_eq!(parsed.encryption.pass_entry, defaults.encryption.pass_entry);
+        assert_eq!(
+            parsed.encryption.auto_lock_secs,
+            defaults.encryption.auto_lock_secs
+        );
         assert_eq!(parsed.dnd.allow_critical, defaults.dnd.allow_critical);
         assert!(parsed.rules.is_empty());
     }

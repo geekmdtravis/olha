@@ -146,18 +146,6 @@ impl NotificationsDaemon {
         inner.mark_active(id);
         drop(inner); // release lock before DB operations
 
-        // Degraded mode: encryption is configured but no DEK is
-        // loaded. Refuse to store anything rather than silently
-        // writing plaintext the user asked to be encrypted. Return a
-        // dbus_id so the caller doesn't see a hard failure mid-flight.
-        if self.state.is_degraded() {
-            tracing::error!(
-                "refusing notification from '{}' in --allow-degraded-read mode (encryption enabled but DEK unavailable)",
-                app_name,
-            );
-            return Ok(id);
-        }
-
         // Extract fields from borrowed hints before they go out of scope
         let urgency = extract_urgency(&hints);
         let category = extract_string_hint(&hints, "category");
@@ -261,23 +249,25 @@ impl NotificationsDaemon {
 
         // Update in DB: find notification by dbus_id and mark as cleared
         match self.state.open_db() {
-            Ok(conn) => match queries::get_notification_by_dbus_id(&conn, id, self.state.enc()) {
-                Ok(Some(notif)) => {
-                    if let Some(row_id) = notif.row_id {
-                        if let Err(e) =
-                            queries::update_status(&conn, row_id, NotificationStatus::Cleared)
-                        {
-                            tracing::error!("Failed to update notification status: {}", e);
+            Ok(conn) => {
+                match queries::get_notification_by_dbus_id(&conn, id, &self.state.enc_mode()) {
+                    Ok(Some(notif)) => {
+                        if let Some(row_id) = notif.row_id {
+                            if let Err(e) =
+                                queries::update_status(&conn, row_id, NotificationStatus::Cleared)
+                            {
+                                tracing::error!("Failed to update notification status: {}", e);
+                            }
                         }
                     }
+                    Ok(None) => {
+                        tracing::debug!("CloseNotification: dbus_id={} not found in DB", id);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to look up notification dbus_id={}: {}", id, e);
+                    }
                 }
-                Ok(None) => {
-                    tracing::debug!("CloseNotification: dbus_id={} not found in DB", id);
-                }
-                Err(e) => {
-                    tracing::error!("Failed to look up notification dbus_id={}: {}", id, e);
-                }
-            },
+            }
             Err(e) => {
                 tracing::error!("Failed to open DB for CloseNotification: {}", e);
             }
@@ -353,13 +343,12 @@ impl NotificationsDaemon {
         }
     }
 
-    /// Store a notification in the database. When encryption is
-    /// enabled at daemon startup, sensitive fields are encrypted into
-    /// the matching `_enc` BLOB columns; otherwise it's the legacy
-    /// plaintext path.
+    /// Store a notification in the database. Writes are sealed
+    /// against the public key whenever encryption is enabled — works
+    /// even with the daemon locked (no sk required for writes).
     fn store_notification(&self, notif: &Notification) -> Result<i64, crate::db::DbError> {
         let conn = self.state.open_db()?;
-        queries::insert_notification(&conn, notif, self.state.enc())
+        queries::insert_notification(&conn, notif, &self.state.enc_mode())
     }
 
     /// Emit a NotificationReceived signal on the org.olha.Daemon interface.

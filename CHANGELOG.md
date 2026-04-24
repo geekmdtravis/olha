@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **X25519 sealed-box at-rest encryption.** The daemon no longer
+  requires an unlocked secret at startup: it loads the long-lived
+  public key from the DB's `meta` table and seals every incoming
+  notification. Reads of encrypted rows require running `olha unlock`
+  (which derives the DEK via `pass show`, unwraps the X25519 secret
+  key, and holds it in memory). `olha lock` zeroes the secret
+  immediately; the daemon also auto-locks after `[encryption].auto_lock_secs`
+  of idle (default 300). `org.olha.Daemon` gains `Unlock`, `Lock`,
+  `IsUnlocked`, and a `LockedChanged(bool)` signal.
+- New `olha encryption` subcommands: `disable --rekey-to-plaintext`
+  (intentional plaintext downgrade, requires daemon stopped),
+  `rewrap` (re-wrap the X25519 secret under a new DEK — fast, only
+  touches `meta`), and `rotate-key` (new X25519 keypair, re-seal
+  every row).
+- Top-level `olha unlock` / `olha lock` subcommands.
+- `[popup].hide_content_when_locked` (global, default `false`) and
+  per-rule `hide_content_when_locked: Option<bool>` — iPhone-style
+  "show previews" gating for popups while the daemon is locked.
+- `[encryption].auto_lock_secs` config knob (default 300; 0
+  disables).
 - Do Not Disturb mode. `olha dnd [status|on|off|toggle]` flips a
   runtime flag that the daemon persists to a new `meta` KV table in
   SQLite, so it survives restarts. While DND is on, notifications are
@@ -37,6 +57,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - "Shell Completions" section in the README with install instructions.
 
 ### Changed
+- **Encryption model reworked.** Writes now always work when
+  encryption is enabled (they seal under the public key regardless of
+  whether anyone has unlocked). Reads of encrypted rows require an
+  unlock. The daemon no longer holds a DEK in memory across its
+  lifetime — only the 32-byte X25519 secret lives between unlock and
+  lock/auto-lock. The `--allow-degraded-read` flag is removed; the
+  equivalent behavior ("daemon is running but can't read encrypted
+  rows") is now the default locked state.
+- `olha encryption init` now generates an X25519 keypair in addition
+  to seeding the `pass` entry; stores pk + wrapped sk in `meta`.
+- `olha encryption rotate` is split into `rewrap` (rotate DEK only;
+  cheap) and `rotate-key` (rotate X25519 keypair; re-seals every row).
 - `olha invoke <id> <key>` now looks up the notification, emits the FDO
   `ActionInvoked(dbus_id, key)` signal, and marks the notification `read`.
   Previously the daemon method was a no-op stub that only logged.

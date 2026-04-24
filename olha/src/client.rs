@@ -23,9 +23,15 @@ pub trait ControlDaemon {
     fn status(&self) -> zbus::Result<String>;
     fn get_dnd(&self) -> zbus::Result<String>;
     fn set_dnd(&self, enabled: bool) -> zbus::Result<()>;
+    fn unlock(&self) -> zbus::Result<()>;
+    fn lock(&self) -> zbus::Result<()>;
+    fn is_unlocked(&self) -> zbus::Result<bool>;
 
     #[zbus(signal)]
     fn notification_received(&self, notification: &str) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn locked_changed(&self, unlocked: bool) -> zbus::Result<()>;
 }
 
 pub struct ListFilter {
@@ -309,7 +315,10 @@ pub async fn dnd(action: DndAction, json: bool) -> Result<(), Box<dyn std::error
     }
 
     let val: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
-    let enabled = val.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let enabled = val
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let allow_critical = val
         .get("allow_critical")
         .and_then(|v| v.as_bool())
@@ -333,7 +342,31 @@ async fn read_dnd_enabled(
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let raw = proxy.get_dnd().await.map_err(map_call_error)?;
     let val: serde_json::Value = serde_json::from_str(&raw)?;
-    Ok(val.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false))
+    Ok(val
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false))
+}
+
+pub async fn unlock() -> Result<(), Box<dyn std::error::Error>> {
+    let proxy = connect().await?;
+    proxy.unlock().await.map_err(map_call_error)?;
+    let raw = proxy.status().await.map_err(map_call_error)?;
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+        if let Some(kid) = val.pointer("/encryption/key_id").and_then(|v| v.as_str()) {
+            println!("unlocked (key_id: {})", kid);
+            return Ok(());
+        }
+    }
+    println!("unlocked");
+    Ok(())
+}
+
+pub async fn lock() -> Result<(), Box<dyn std::error::Error>> {
+    let proxy = connect().await?;
+    proxy.lock().await.map_err(map_call_error)?;
+    println!("locked");
+    Ok(())
 }
 
 pub async fn status(json: bool) -> Result<(), Box<dyn std::error::Error>> {
@@ -364,8 +397,31 @@ pub async fn status(json: bool) -> Result<(), Box<dyn std::error::Error>> {
             println!("  Rules: {}", n);
         }
         if let Some(dnd) = val.get("dnd") {
-            let enabled = dnd.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+            let enabled = dnd
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             println!("  DND: {}", if enabled { "on" } else { "off" });
+        }
+        if let Some(enc) = val.get("encryption") {
+            let enabled = enc
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if enabled {
+                let unlocked = enc
+                    .get("unlocked")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let kid = enc.get("key_id").and_then(|v| v.as_str()).unwrap_or("?");
+                println!(
+                    "  Encryption: {} (key_id {})",
+                    if unlocked { "unlocked" } else { "locked" },
+                    kid
+                );
+            } else {
+                println!("  Encryption: off");
+            }
         }
     } else {
         println!("{}", result);

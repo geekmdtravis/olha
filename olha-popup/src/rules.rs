@@ -9,6 +9,9 @@ pub struct RuleDecision {
     pub suppress: bool,
     pub override_urgency: Option<Urgency>,
     pub override_timeout_secs: Option<u32>,
+    /// Per-rule override of the global `hide_content_when_locked`. `None`
+    /// = no override (defer to global); `Some(true|false)` = force.
+    pub hide_content_when_locked: Option<bool>,
     pub matched: Option<String>,
 }
 
@@ -21,6 +24,7 @@ struct Compiled {
     suppress: bool,
     override_urgency: Option<Urgency>,
     override_timeout_secs: Option<u32>,
+    hide_content_when_locked: Option<bool>,
 }
 
 pub struct PopupRules {
@@ -57,6 +61,7 @@ impl PopupRules {
                 suppress: rule.suppress,
                 override_urgency: rule.override_urgency,
                 override_timeout_secs: rule.override_timeout_secs,
+                hide_content_when_locked: rule.hide_content_when_locked,
                 matched: Some(rule.name.clone()),
             };
         }
@@ -78,6 +83,7 @@ fn compile(r: &PopupRule) -> Result<Compiled, regex::Error> {
         suppress: r.suppress,
         override_urgency: r.override_urgency,
         override_timeout_secs: r.override_timeout_secs,
+        hide_content_when_locked: r.hide_content_when_locked,
     })
 }
 

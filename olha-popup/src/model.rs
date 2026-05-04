@@ -48,4 +48,7 @@ pub struct PopupState {
     pub actions: Vec<Action>,
     /// None = sticky (no auto-dismiss).
     pub expires_at: Option<Instant>,
+    /// Pixel height chosen for this popup's layer-shell surface.
+    /// Stacking math reads it to position popups below this one.
+    pub height: u32,
 }

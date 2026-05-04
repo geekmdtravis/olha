@@ -71,6 +71,12 @@ pub struct PopupConfig {
     pub width: u32,
     #[serde(default = "default_height")]
     pub height: u32,
+    /// Upper bound the popup will grow to when the body wraps to several
+    /// lines or there are action buttons. Beyond this the body is
+    /// truncated with an ellipsis. Acts as a ceiling on the per-popup
+    /// height estimate; `height` is the floor.
+    #[serde(default = "default_max_height")]
+    pub max_height: u32,
     /// When true AND the daemon reports `is_unlocked = false`,
     /// popups render a generic placeholder instead of the actual
     /// summary/body. Default false — always show content.
@@ -129,6 +135,9 @@ fn default_width() -> u32 {
 fn default_height() -> u32 {
     120
 }
+fn default_max_height() -> u32 {
+    240
+}
 
 impl Default for PopupConfig {
     fn default() -> Self {
@@ -139,6 +148,7 @@ impl Default for PopupConfig {
             gap: default_gap(),
             width: default_width(),
             height: default_height(),
+            max_height: default_max_height(),
             hide_content_when_locked: false,
             rules: Vec::new(),
         }

@@ -62,7 +62,8 @@
 # margin      = 12            # px from screen edge
 # gap         = 8             # px between stacked popups
 # width       = 380
-# height      = 120
+# height      = 120          # minimum popup height (px); short notifications use this
+# max_height  = 240          # ceiling; bodies past this point are truncated with …
 #
 # Privacy: when true AND the daemon is locked, popups render a generic
 # "<app>" / "New notification" placeholder instead of the real content.

@@ -114,47 +114,36 @@ impl App {
         }
     }
 
-    fn margin_for(&self, index: usize) -> (i32, i32, i32, i32) {
-        let (_, margin) = anchor_and_margin(
-            self.config.popup.position,
-            self.config.popup.margin,
-            self.config.popup.gap,
-            self.config.popup.height,
-            index,
-        );
-        margin
-    }
-
     /// Emit `MarginChange` messages for popups starting at `start` so they
     /// settle into their current `IndexMap` positions. Call this after any
     /// insert/remove so the stack closes gaps and new popups push old ones
     /// down. `start = 1` after inserting at index 0 skips the new popup (it's
     /// already placed via `NewLayerShell`); `start = 0` after a removal
     /// repositions the whole stack.
+    ///
+    /// Walks once and accumulates height + gap so popups with different
+    /// heights stack correctly without overlap.
     fn relayout_tasks(&self, start: usize) -> Vec<Task<Message>> {
-        self.popups
-            .keys()
-            .enumerate()
-            .skip(start)
-            .map(|(i, id)| {
-                Task::done(Message::MarginChange {
-                    id: *id,
-                    margin: self.margin_for(i),
-                })
-            })
-            .collect()
+        let pos = self.config.popup.position;
+        let edge = self.config.popup.margin;
+        let gap = self.config.popup.gap;
+        let mut tasks = Vec::new();
+        let mut offset: u32 = 0;
+        for (i, (id, state)) in self.popups.iter().enumerate() {
+            if i >= start {
+                let (_, margin) = anchor_and_margin(pos, edge, offset);
+                tasks.push(Task::done(Message::MarginChange { id: *id, margin }));
+            }
+            offset = offset.saturating_add(state.height).saturating_add(gap);
+        }
+        tasks
     }
 
-    fn new_layer_settings(&self, index: usize) -> NewLayerShellSettings {
-        let (anchor, margin) = anchor_and_margin(
-            self.config.popup.position,
-            self.config.popup.margin,
-            self.config.popup.gap,
-            self.config.popup.height,
-            index,
-        );
+    fn new_layer_settings(&self, height: u32, offset: u32) -> NewLayerShellSettings {
+        let (anchor, margin) =
+            anchor_and_margin(self.config.popup.position, self.config.popup.margin, offset);
         NewLayerShellSettings {
-            size: Some((self.config.popup.width, self.config.popup.height)),
+            size: Some((self.config.popup.width, height)),
             exclusive_zone: None,
             anchor,
             layer: Layer::Overlay,
@@ -223,14 +212,23 @@ impl App {
             (notif.summary, notif.body)
         };
 
+        let (height, body_for_render) = compute_layout(
+            &display_body,
+            !notif.actions.is_empty(),
+            self.config.popup.width,
+            self.config.popup.height,
+            self.config.popup.max_height,
+        );
+
         let state = PopupState {
             row_id: notif.row_id,
             urgency,
             app_name: notif.app_name,
             summary: display_summary,
-            body: display_body,
+            body: body_for_render,
             actions: notif.actions,
             expires_at,
+            height,
         };
 
         // Newest popup goes at index 0 (closest to the anchor edge) and
@@ -238,7 +236,7 @@ impl App {
         // below places the new window directly at the correct margin; the
         // relayout tasks reposition the now-shifted survivors.
         let id = iced::window::Id::unique();
-        let settings = self.new_layer_settings(0);
+        let settings = self.new_layer_settings(height, 0);
         self.popups.shift_insert(0, id, state);
 
         let mut tasks: Vec<Task<Message>> = Vec::new();
@@ -440,21 +438,24 @@ fn locked_stream() -> impl iced::futures::Stream<Item = Message> {
     })
 }
 
+/// `offset` is the cumulative pixel distance from the screen edge to where
+/// this popup's anchor edge should sit — i.e. the sum of the heights of
+/// every popup stacked closer to the anchor, plus one `gap` between each.
+/// Callers compute it once while walking the popup list (see
+/// `App::relayout_tasks`).
 fn anchor_and_margin(
     pos: Position,
     edge_margin: u32,
-    gap: u32,
-    popup_height: u32,
-    index: usize,
+    offset: u32,
 ) -> (Anchor, (i32, i32, i32, i32)) {
-    let offset = (popup_height as i32 + gap as i32) * index as i32;
     let m = edge_margin as i32;
+    let o = offset as i32;
     match pos {
         // Tuple order: (top, right, bottom, left) — matches iced_layershell NewLayerShellSettings.
-        Position::TopRight => (Anchor::Top | Anchor::Right, (m + offset, m, 0, 0)),
-        Position::TopLeft => (Anchor::Top | Anchor::Left, (m + offset, 0, 0, m)),
-        Position::BottomRight => (Anchor::Bottom | Anchor::Right, (0, m, m + offset, 0)),
-        Position::BottomLeft => (Anchor::Bottom | Anchor::Left, (0, 0, m + offset, m)),
+        Position::TopRight => (Anchor::Top | Anchor::Right, (m + o, m, 0, 0)),
+        Position::TopLeft => (Anchor::Top | Anchor::Left, (m + o, 0, 0, m)),
+        Position::BottomRight => (Anchor::Bottom | Anchor::Right, (0, m, m + o, 0)),
+        Position::BottomLeft => (Anchor::Bottom | Anchor::Left, (0, 0, m + o, m)),
     }
 }
 
@@ -487,10 +488,12 @@ fn popup_view(id: iced::window::Id, state: &PopupState) -> Element<'_, Message> 
     // region so they keep their own on_press behavior.
     let mut default_stack = column![summary].spacing(4);
     if !state.body.is_empty() {
-        let body = truncate_body(&state.body, 220);
-        default_stack = default_stack.push(text(body).size(12).style(|_: &Theme| text::Style {
-            color: Some(subtle()),
-        }));
+        default_stack =
+            default_stack.push(text(state.body.as_str()).size(12).style(|_: &Theme| {
+                text::Style {
+                    color: Some(subtle()),
+                }
+            }));
     }
     let default_region: Element<'_, Message> = button(default_stack)
         .on_press(Message::ActionClicked(id, "default".to_string()))
@@ -657,12 +660,143 @@ fn darken(c: Color, amt: f32) -> Color {
     }
 }
 
-fn truncate_body(body: &str, max: usize) -> String {
-    if body.chars().count() <= max {
-        body.to_string()
+// -----------------------------------------------------------------------------
+// Layout estimation
+// -----------------------------------------------------------------------------
+//
+// iced_layershell needs a fixed surface size at window creation time, so we
+// estimate how tall the popup wants to be from its content, clamp it into the
+// configured `[height, max_height]` range, and pre-truncate the body if it
+// won't fit. Numbers below mirror the chrome assembled in `popup_view`.
+
+const CONTAINER_PAD_V: u32 = 20; // top 10 + bottom 10
+const CONTAINER_PAD_LEFT: u32 = 10;
+const CONTAINER_PAD_RIGHT: u32 = 14;
+const ACCENT_BAR_W: u32 = 4;
+const ACCENT_GAP_W: u32 = 10;
+const OUTER_SPACING: u32 = 4; // column![header, default_region].spacing(4)
+const INNER_SPACING: u32 = 4; // column![summary, body].spacing(4)
+const HEADER_H: u32 = 18; // text(11) + × button(text 16) row
+const SUMMARY_H: u32 = 18; // text(14) at line height ~1.3
+const BODY_LINE_H: u32 = 16; // text(12) at line height ~1.3
+const ACTION_SPACER_H: u32 = 2;
+const ACTION_ROW_H: u32 = 24; // button(text 12, padding [4,10]) ≈ 16 + 8
+const AVG_GLYPH_W: f32 = 7.0; // size-12 average; deliberately overestimated
+
+/// Decide the popup's pixel height and the body string to render.
+///
+/// Returns `(height, body)` where `height` is clamped into
+/// `[min_height, max_height]` and `body` is `body_in` truncated with an
+/// ellipsis if the chosen height can't fit every wrapped line.
+fn compute_layout(
+    body_in: &str,
+    has_actions: bool,
+    popup_width: u32,
+    min_height: u32,
+    max_height: u32,
+) -> (u32, String) {
+    let max_height = max_height.max(min_height);
+
+    let body_region_w = popup_width
+        .saturating_sub(CONTAINER_PAD_LEFT + CONTAINER_PAD_RIGHT + ACCENT_BAR_W + ACCENT_GAP_W);
+    let chars_per_line = ((body_region_w as f32 / AVG_GLYPH_W).floor() as usize).max(20);
+
+    let action_block = if has_actions {
+        OUTER_SPACING + ACTION_SPACER_H + OUTER_SPACING + ACTION_ROW_H
     } else {
-        let mut out: String = body.chars().take(max).collect();
+        0
+    };
+    let chrome = CONTAINER_PAD_V + HEADER_H + OUTER_SPACING + SUMMARY_H + action_block;
+
+    let body_chars = body_in.chars().count();
+    let body_lines_natural = if body_chars == 0 {
+        0
+    } else {
+        body_in
+            .split('\n')
+            .map(|line| {
+                let n = line.chars().count();
+                if n == 0 {
+                    1
+                } else {
+                    n.div_ceil(chars_per_line)
+                }
+            })
+            .sum()
+    };
+    let body_block_natural = if body_lines_natural > 0 {
+        INNER_SPACING + body_lines_natural as u32 * BODY_LINE_H
+    } else {
+        0
+    };
+
+    let chosen = (chrome + body_block_natural).clamp(min_height, max_height);
+
+    // How many body lines actually fit in the chosen height?
+    let body_budget = chosen.saturating_sub(chrome);
+    let max_body_lines = if body_budget > INNER_SPACING {
+        ((body_budget - INNER_SPACING) / BODY_LINE_H) as usize
+    } else {
+        0
+    };
+
+    let body = if body_chars == 0 || max_body_lines == 0 {
+        String::new()
+    } else if body_lines_natural <= max_body_lines {
+        body_in.to_string()
+    } else {
+        // Reserve one slot for the ellipsis at the end of the last visible line.
+        let cap = (max_body_lines * chars_per_line).saturating_sub(1).max(1);
+        let mut out: String = body_in.chars().take(cap).collect();
         out.push('…');
         out
+    };
+
+    (chosen, body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const W: u32 = 380;
+    const MIN: u32 = 120;
+    const MAX: u32 = 240;
+
+    #[test]
+    fn empty_body_no_actions_uses_min_height() {
+        let (h, body) = compute_layout("", false, W, MIN, MAX);
+        assert_eq!(h, MIN);
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn long_body_grows_up_to_max() {
+        let body = "x".repeat(2000);
+        let (h, out) = compute_layout(&body, true, W, MIN, MAX);
+        assert_eq!(h, MAX);
+        assert!(out.ends_with('…'));
+        assert!(out.chars().count() < body.chars().count());
+    }
+
+    #[test]
+    fn short_body_with_actions_grows_above_min() {
+        let body = "Short body that wraps once or twice across this popup width.";
+        let (h, out) = compute_layout(body, true, W, MIN, MAX);
+        assert!((MIN..=MAX).contains(&h));
+        assert_eq!(out, body, "no truncation expected at this length");
+    }
+
+    #[test]
+    fn min_height_is_floor_even_when_content_is_tiny() {
+        let (h, _) = compute_layout("hi", false, W, MIN, MAX);
+        assert_eq!(h, MIN);
+    }
+
+    #[test]
+    fn max_below_min_is_clamped() {
+        // Misconfiguration: max_height < height. Floor wins.
+        let (h, _) = compute_layout("hi", false, W, 200, 100);
+        assert_eq!(h, 200);
     }
 }

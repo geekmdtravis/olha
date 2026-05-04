@@ -736,8 +736,13 @@ max_visible = 5             # oldest non-critical popup is evicted when exceeded
 margin      = 12            # px from screen edge
 gap         = 8             # px between stacked popups
 width       = 380
-height      = 120
+height      = 120           # minimum height; short notifications stay this tall
+max_height  = 240           # ceiling — bodies past this are truncated with an ellipsis
 ```
+
+Each popup picks its own height between `height` and `max_height` based on whether
+the body wraps and whether action buttons are present, so a one-line popup stays
+compact while a multi-line one with buttons grows up to the ceiling.
 
 Per-urgency timeouts come from the existing `[notifications]` section:
 

@@ -158,7 +158,7 @@ enum Commands {
     ///
     /// While DND is on, incoming notifications are still stored in
     /// history but popups are silenced. Critical urgency notifications
-    /// break through unless you set `dnd.allow_critical = false` in
+    /// only break through when `dnd.allow_critical = true` is set in
     /// config.toml.
     Dnd {
         /// Action to take. Omit to show current state.

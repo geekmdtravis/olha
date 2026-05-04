@@ -24,7 +24,7 @@
 # (it persists across daemon restarts). This section only configures the
 # policy applied while DND is active.
 #
-# allow_critical = true    # critical urgency still pops through; false silences everything
+# allow_critical = false   # set true to let critical urgency pop through
 
 [encryption]
 # At-rest encryption of notification content (summary, body, hints).

@@ -33,8 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SQLite, so it survives restarts. While DND is on, notifications are
   still stored in history but the `notification_received` signal is
   suppressed — `olha-popup` and `olha subscribe` stay quiet. Critical
-  urgency breaks through by default; set `[dnd].allow_critical = false`
-  in `config.toml` to silence everything. `org.olha.Daemon` gains
+  urgency is silenced by default; set `[dnd].allow_critical = true`
+  in `config.toml` to let it pass through. `org.olha.Daemon` gains
   `GetDnd`, `SetDnd`, and a `DndChanged` signal; `olha status` shows
   the current DND state.
 - New workspace crate `olha-popup`: a native Wayland (wlr-layer-shell) notifier

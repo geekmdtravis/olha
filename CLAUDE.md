@@ -93,7 +93,7 @@ Startup flow (`olhad/src/main.rs`):
 
 ## Do Not Disturb
 
-`org.olha.Daemon.SetDnd(bool)` flips an `AtomicBool` in `DaemonState` and persists the value to `meta` (key `dnd_enabled`). When DND is on, `emit_notification_signal` in `olhad/src/dbus/freedesktop.rs` swallows the `notification_received` signal so subscribers (`olha-popup`, `olha subscribe`) stay quiet — but storage runs as usual. Critical-urgency notifications bypass DND when `[dnd].allow_critical = true` (the default). `dnd_changed(bool)` is emitted on every toggle for reactive clients. State is reloaded from `meta` at daemon startup in `olhad/src/main.rs`.
+`org.olha.Daemon.SetDnd(bool)` flips an `AtomicBool` in `DaemonState` and persists the value to `meta` (key `dnd_enabled`). When DND is on, `emit_notification_signal` in `olhad/src/dbus/freedesktop.rs` swallows the `notification_received` signal so subscribers (`olha-popup`, `olha subscribe`) stay quiet — but storage runs as usual. Critical-urgency notifications bypass DND only when `[dnd].allow_critical = true` is explicitly set. `dnd_changed(bool)` is emitted on every toggle for reactive clients. State is reloaded from `meta` at daemon startup in `olhad/src/main.rs`.
 
 ## Config and paths
 

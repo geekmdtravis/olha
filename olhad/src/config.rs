@@ -199,9 +199,9 @@ impl EncryptionConfig {
 /// policy applied while DND is active.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DndConfig {
-    /// When true (default), notifications with `urgency = critical`
-    /// still pop through while DND is on. Flip to false to silence
-    /// everything.
+    /// When true, notifications with `urgency = critical` still pop
+    /// through while DND is on. Defaults to false so DND silences
+    /// everything unless pass-through is explicitly enabled.
     #[serde(default = "DndConfig::default_allow_critical")]
     pub allow_critical: bool,
 }
@@ -216,7 +216,7 @@ impl Default for DndConfig {
 
 impl DndConfig {
     fn default_allow_critical() -> bool {
-        true
+        false
     }
 }
 
@@ -332,6 +332,11 @@ mod tests {
         assert_eq!(parse_duration("1h"), Some(3600));
         assert_eq!(parse_duration("30m"), Some(1800));
         assert_eq!(parse_duration("60s"), Some(60));
+    }
+
+    #[test]
+    fn dnd_does_not_allow_critical_by_default() {
+        assert!(!DndConfig::default().allow_critical);
     }
 
     /// The bundled template is what first-run users get written to disk, so

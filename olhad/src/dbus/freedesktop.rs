@@ -356,7 +356,7 @@ impl NotificationsDaemon {
     /// Under DND, we swallow the signal so subscribers (olha-popup,
     /// `olha subscribe`) stay quiet, but storage has already happened
     /// at the call site — the notification is still in `olha list`.
-    /// Critical urgency bypasses DND when `[dnd].allow_critical` is on.
+    /// Critical urgency bypasses DND only when `[dnd].allow_critical` is on.
     async fn emit_notification_signal(&self, notif: &Notification) {
         if self.state.is_dnd()
             && dnd_suppresses(notif.urgency, self.state.config.dnd.allow_critical)
@@ -403,7 +403,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dnd_lets_critical_through_when_allowed() {
+    fn dnd_lets_critical_through_when_explicitly_allowed() {
         assert!(!dnd_suppresses(Urgency::Critical, true));
         assert!(dnd_suppresses(Urgency::Normal, true));
         assert!(dnd_suppresses(Urgency::Low, true));

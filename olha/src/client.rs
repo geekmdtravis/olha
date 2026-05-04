@@ -322,7 +322,7 @@ pub async fn dnd(action: DndAction, json: bool) -> Result<(), Box<dyn std::error
     let allow_critical = val
         .get("allow_critical")
         .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+        .unwrap_or(false);
 
     let state = if enabled { "on" } else { "off" };
     println!("DND: {}", state);

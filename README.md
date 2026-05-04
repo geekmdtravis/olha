@@ -13,7 +13,7 @@ Unlike traditional notification daemons that show popups and forget, **olha** st
 - **Minimal & Fast**: Written in Rust, lightweight daemon with zero dependencies on GTK/heavy UI libraries
 - **Scriptable**: JSON output, subscribe mode for real-time event streaming
 - **Notification Rules**: Auto-mute, auto-clear, or ignore notifications based on regex patterns
-- **Do Not Disturb**: Silence popups on demand; history is still recorded, and critical notifications break through by default
+- **Do Not Disturb**: Silence popups on demand; history is still recorded, and critical notifications require an explicit pass-through flag
 - **Automatic Cleanup**: Configurable retention policies (max age, max count)
 - **At-Rest Encryption** (optional): X25519 sealed-box so writes work even when the daemon is locked; reads of stored history need `olha unlock`. Idle auto-lock after 5 minutes by default.
 
@@ -143,13 +143,13 @@ olha dnd toggle
 olha dnd --json     # machine-readable: {"enabled":..., "allow_critical":...}
 ```
 
-Critical-urgency notifications (battery warnings, system errors)
-break through DND by default. To make DND silence *everything*, set
-this in your config:
+DND silences every urgency by default, including critical notifications
+like battery warnings and system errors. To let critical urgency pass
+through, set this in your config:
 
 ```toml
 [dnd]
-allow_critical = false
+allow_critical = true
 ```
 
 Notes:
@@ -598,8 +598,8 @@ While DND is on, the daemon still writes every incoming notification
 to the database — the `notification_received` signal is simply not
 emitted, so `olha-popup` and `olha subscribe` stay quiet. History is
 always recoverable via `olha list`. Critical-urgency notifications
-break through by default; see the [Do Not Disturb config
-section](#do-not-disturb) to silence everything instead.
+are silenced unless `[dnd].allow_critical = true` is set; see the
+[Do Not Disturb config section](#do-not-disturb).
 
 ## Notification Lifecycle
 
